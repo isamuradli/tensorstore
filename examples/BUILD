@@ -122,3 +122,161 @@ tensorstore_cc_binary(
         "@riegeli//riegeli/bytes:writer",
     ],
 )
+
+tensorstore_cc_binary(
+    name = "remote_dram_example",
+    srcs = ["remote_dram_example.cc"],
+    deps = [
+        "//tensorstore",
+        "//tensorstore:all_drivers",
+        "//tensorstore:array",
+        "//tensorstore:context",
+        "//tensorstore:data_type",
+        "//tensorstore:index",
+        "//tensorstore:open",
+        "//tensorstore:spec",
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram:remote_dram",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings:str_format",
+        "@nlohmann_json//:json",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "remote_dram_server",
+    srcs = ["remote_dram_server.cc"],
+    deps = [
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram:remote_dram",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings:str_format",
+        "@nlohmann_json//:json",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "remote_dram_client",
+    srcs = ["remote_dram_client.cc"],
+    deps = [
+        "//tensorstore",
+        "//tensorstore:all_drivers",
+        "//tensorstore:array",
+        "//tensorstore:context",
+        "//tensorstore:data_type",
+        "//tensorstore:index",
+        "//tensorstore:open",
+        "//tensorstore:open_mode",
+        "//tensorstore:spec",
+        "//tensorstore/kvstore/remote_dram:remote_dram",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings:str_format",
+        "@nlohmann_json//:json",
+    ],
+)
+
+
+tensorstore_cc_binary(
+    name = "simple_remote_dram_server",
+    srcs = ["simple_remote_dram_server.cc"],
+    deps = [
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:initialize",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "simple_remote_dram_tensor_client",
+    srcs = ["simple_remote_dram_tensor_client.cc"],
+    deps = [
+        "//tensorstore",
+        "//tensorstore:all_drivers",
+        "//tensorstore:array",
+        "//tensorstore:context",
+        "//tensorstore:data_type",
+        "//tensorstore:index",
+        "//tensorstore:open",
+        "//tensorstore/index_space:dim_expression",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:initialize",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "writer_client",
+    srcs = ["writer_client.cc"],
+    deps = [
+        "//tensorstore",
+        "//tensorstore:all_drivers",
+        "//tensorstore:array",
+        "//tensorstore:context",
+        "//tensorstore:data_type",
+        "//tensorstore:index",
+        "//tensorstore:open",
+        "//tensorstore/index_space:dim_expression",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:initialize",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "reader_client",
+    srcs = ["reader_client.cc"],
+    deps = [
+        "//tensorstore",
+        "//tensorstore:all_drivers",
+        "//tensorstore:array",
+        "//tensorstore:context",
+        "//tensorstore:data_type",
+        "//tensorstore:index",
+        "//tensorstore:open",
+        "//tensorstore/index_space:dim_expression",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:initialize",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "simple_writer_client",
+    srcs = ["simple_writer_client.cc"],
+    deps = [
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:initialize",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "simple_reader_client",
+    srcs = ["simple_reader_client.cc"],
+    deps = [
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/log:initialize",
+    ],
+)

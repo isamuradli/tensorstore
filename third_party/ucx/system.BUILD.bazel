@@ -1,0 +1,33 @@
+# UCX Service layer (UCS) - system package
+cc_library(
+    name = "ucs",
+    defines = ["TENSORSTORE_SYSTEM_UCX"],
+    linkopts = ["-lucs"],
+    visibility = ["//visibility:public"],
+)
+
+# UCX Transport layer (UCT) - system package  
+cc_library(
+    name = "uct",
+    defines = ["TENSORSTORE_SYSTEM_UCX"],
+    linkopts = ["-luct"],
+    deps = [":ucs"],
+    visibility = ["//visibility:public"],
+)
+
+# UCX Protocol layer (UCP) - system package
+cc_library(
+    name = "ucp", 
+    defines = ["TENSORSTORE_SYSTEM_UCX"],
+    linkopts = ["-lucp"],
+    deps = [":ucs", ":uct"],
+    visibility = ["//visibility:public"],
+)
+
+# Main UCX library (convenience target)
+cc_library(
+    name = "ucx",
+    defines = ["TENSORSTORE_SYSTEM_UCX"],
+    linkopts = ["-lucp", "-luct", "-lucs"],
+    visibility = ["//visibility:public"],
+) 

@@ -1,0 +1,146 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+
+package(default_visibility = ["//visibility:private"])
+
+licenses(["notice"])
+
+exports_files(["LICENSE"])
+
+# To enable UCX debug output, specify:
+# bazel build --@ucx//:debug
+bool_flag(
+    name = "debug",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "debug_setting",
+    flag_values = {
+        ":debug": "True",
+    },
+)
+
+# UCX Service layer (UCS) - provides utilities and services
+cc_library(
+    name = "ucs",
+    srcs = glob([
+        "src/ucs/**/*.c",
+    ], exclude = [
+        "src/ucs/**/*test*",
+        "src/ucs/**/test_*",
+    ]),
+    hdrs = glob([
+        "src/ucs/**/*.h",
+    ]),
+    copts = [
+        "-DUCX_API_MAJOR=1",
+        "-DUCX_API_MINOR=17",
+    ] + select({
+        ":debug_setting": ["-DENABLE_DEBUG_DATA", "-DENABLE_LOGGING"],
+        "//conditions:default": [],
+    }),
+    includes = [
+        "src",
+        "src/ucs",
+    ],
+    linkopts = select({
+        "@platforms//os:linux": ["-pthread", "-lrt"],
+        "@platforms//os:osx": ["-pthread"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+# UCX Transport layer (UCT) - low-level transport abstractions
+cc_library(
+    name = "uct",
+    srcs = glob([
+        "src/uct/**/*.c",
+    ], exclude = [
+        "src/uct/**/*test*",
+        "src/uct/**/test_*",
+    ]),
+    hdrs = glob([
+        "src/uct/**/*.h",
+    ]),
+    copts = [
+        "-DUCX_API_MAJOR=1",
+        "-DUCX_API_MINOR=17",
+    ] + select({
+        ":debug_setting": ["-DENABLE_DEBUG_DATA", "-DENABLE_LOGGING"],
+        "//conditions:default": [],
+    }),
+    includes = [
+        "src",
+        "src/uct",
+    ],
+    linkopts = select({
+        "@platforms//os:linux": ["-pthread", "-lrt", "-ldl"],
+        "@platforms//os:osx": ["-pthread", "-ldl"],
+        "//conditions:default": [],
+    }),
+    deps = [":ucs"],
+    visibility = ["//visibility:public"],
+)
+
+# UCX Protocol layer (UCP) - high-level protocols and APIs
+cc_library(
+    name = "ucp",
+    srcs = glob([
+        "src/ucp/**/*.c",
+    ], exclude = [
+        "src/ucp/**/*test*",
+        "src/ucp/**/test_*",
+    ]),
+    hdrs = glob([
+        "src/ucp/**/*.h",
+        "src/ucp/api/*.h",
+    ]),
+    copts = [
+        "-DUCX_API_MAJOR=1",
+        "-DUCX_API_MINOR=17", 
+    ] + select({
+        ":debug_setting": ["-DENABLE_DEBUG_DATA", "-DENABLE_LOGGING"],
+        "//conditions:default": [],
+    }),
+    includes = [
+        "src",
+        "src/ucp",
+        "src/ucp/api",
+    ],
+    linkopts = select({
+        "@platforms//os:linux": ["-pthread", "-lrt", "-ldl"],
+        "@platforms//os:osx": ["-pthread", "-ldl"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":ucs",
+        ":uct",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Main UCX library (convenience target that includes all components)
+cc_library(
+    name = "ucx",
+    deps = [
+        ":ucp",
+        ":uct", 
+        ":ucs",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "compiler_msvc",
+    flag_values = {
+        "@bazel_tools//tools/cpp:compiler": "msvc-cl",
+    },
+)
+
+config_setting(
+    name = "compiler_mingw_gcc", 
+    flag_values = {
+        "@bazel_tools//tools/cpp:compiler": "mingw-gcc",
+    },
+) 

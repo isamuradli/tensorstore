@@ -1,0 +1,9 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+package(default_visibility = ["//visibility:private"])
+
+cc_test(
+    name = "test_ucx_integration",
+    srcs = ["test_ucx_integration.cc"],
+    deps = ["@ucx//:ucx"],
+) 
