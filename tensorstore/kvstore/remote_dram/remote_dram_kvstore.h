@@ -205,6 +205,9 @@ class UcxManager {
   /// Register a client endpoint (for server mode)
   void RegisterClientEndpoint(ucp_ep_h client_endpoint);
   
+  /// Register a server endpoint (for client mode)
+  void RegisterServerEndpoint(ucp_ep_h server_endpoint);
+  
   /// Register a client-side endpoint (for client mode cleanup)
   void RegisterClientSideEndpoint(ucp_ep_h client_endpoint);
   
@@ -261,6 +264,9 @@ class UcxManager {
   
   /// Client endpoints for server mode (to send responses back to clients)
   std::vector<ucp_ep_h> client_endpoints_ ABSL_GUARDED_BY(mutex_);
+  
+  /// Server endpoints for accepting client connections
+  std::vector<ucp_ep_h> server_endpoints_ ABSL_GUARDED_BY(mutex_);
   
   /// Client-side endpoints for client mode (for cleanup)
   std::vector<ucp_ep_h> client_side_endpoints_ ABSL_GUARDED_BY(mutex_);

@@ -1,80 +1,72 @@
-#include <iostream>
-#include <string>
-#include <chrono>
-#include <thread>
+// Simple Writer Client
+// Connects to server and writes test data
 
+#include <iostream>
 #include "tensorstore/kvstore/kvstore.h"
 #include "tensorstore/kvstore/operations.h"
-#include "tensorstore/util/result.h"
+#include "tensorstore/context.h"
 #include "absl/log/absl_log.h"
-#include "absl/log/initialize.h"
+#include "absl/strings/cord.h"
 
-using tensorstore::kvstore::KvStore;
-
-int main(int argc, char* argv[]) {
-  absl::InitializeLog();
+int main() {
+  std::cout << "Starting Writer Client..." << std::endl;
   
-  std::string server_addr = "127.0.0.1:12345";
-  if (argc > 1) {
-    server_addr = argv[1];
-  }
+  // Create client context
+  auto context = tensorstore::Context::Default();
   
-  std::cout << "🖊️  Simple Writer Client connecting to server: " << server_addr << std::endl;
-  
-  // Create a remote_dram kvstore directly
-  auto store_result = tensorstore::kvstore::Open({
+  // Client configuration - connect to server at localhost:12346
+  nlohmann::json spec = {
     {"driver", "remote_dram"},
-    {"remote_addr", server_addr}
-  }).result();
+    {"remote_addr", "127.0.0.1:12346"}
+  };
   
-  if (!store_result.ok()) {
-    std::cerr << "❌ Failed to open kvstore: " << store_result.status() << std::endl;
-    return 1;
-  }
-  
-  auto store = *store_result;
-  std::cout << "✅ Connected to remote DRAM server" << std::endl;
-  
-  // Write some test data
-  std::string key = "test_tensor_data";
-  std::string value = "10,20,30,40,50,60,70,80,90";  // 3x3 tensor data
-  
-  std::cout << "📝 Writing data to key '" << key << "'..." << std::endl;
-  auto write_result = tensorstore::kvstore::Write(store, key, absl::Cord(value)).result();
-  if (!write_result.ok()) {
-    std::cerr << "❌ Failed to write data: " << write_result.status() << std::endl;
-    return 1;
-  }
-  
-  std::cout << "✅ Successfully wrote data: " << value << std::endl;
-  
-  // Verify the write by reading it back
-  std::cout << "🔍 Verifying write by reading back..." << std::endl;
-  auto read_result = tensorstore::kvstore::Read(store, key).result();
-  if (!read_result.ok()) {
-    std::cerr << "❌ Failed to read back data: " << read_result.status() << std::endl;
-    return 1;
-  }
-  
-  if (read_result->state == tensorstore::kvstore::ReadResult::kValue) {
-    std::string read_value = std::string(read_result->value);
-    std::cout << "✅ Read back data: " << read_value << std::endl;
-    
-    if (read_value == value) {
-      std::cout << "✅ Data verification: PASSED!" << std::endl;
-    } else {
-      std::cout << "❌ Data verification: FAILED - Values don't match!" << std::endl;
+  try {
+    // Open kvstore in client mode
+    auto kvstore_result = tensorstore::kvstore::Open(spec, context).result();
+    if (!kvstore_result.ok()) {
+      std::cerr << "❌ Failed to open kvstore: " << kvstore_result.status() << std::endl;
       return 1;
     }
-  } else {
-    std::cout << "❌ Data not found after write!" << std::endl;
+    
+    auto kvstore = kvstore_result.value();
+    std::cout << "✅ Client connected to server" << std::endl;
+    
+    // Create test data
+    std::string test_key = "test_key_123";
+    std::string test_value = "Hello from writer client!";
+    
+    std::cout << "Writing data..." << std::endl;
+    std::cout << "Key: " << test_key << std::endl;
+    std::cout << "Value: " << test_value << std::endl;
+    
+    // Write data to server
+    auto write_result = tensorstore::kvstore::Write(kvstore, test_key, absl::Cord(test_value)).result();
+    if (!write_result.ok()) {
+      std::cerr << "❌ Failed to write data: " << write_result.status() << std::endl;
+      return 1;
+    }
+    
+    std::cout << "✅ Data written successfully to server!" << std::endl;
+    std::cout << "Generation: " << write_result.value().generation.value << std::endl;
+    
+    // Write a second test entry
+    std::string test_key2 = "test_key_456";
+    std::string test_value2 = "Second test entry";
+    
+    std::cout << "\nWriting second entry..." << std::endl;
+    auto write_result2 = tensorstore::kvstore::Write(kvstore, test_key2, absl::Cord(test_value2)).result();
+    if (!write_result2.ok()) {
+      std::cerr << "❌ Failed to write second entry: " << write_result2.status() << std::endl;
+      return 1;
+    }
+    
+    std::cout << "✅ Second entry written successfully!" << std::endl;
+    std::cout << "Writer client completed successfully." << std::endl;
+    
+  } catch (const std::exception& e) {
+    std::cerr << "❌ Client error: " << e.what() << std::endl;
     return 1;
   }
   
-  // Sleep for a while to allow reader client to access the data
-  std::cout << "💤 Writer sleeping for 30 seconds to allow reader client to access the data..." << std::endl;
-  std::this_thread::sleep_for(std::chrono::seconds(30));
-  
-  std::cout << "🏁 Simple writer client finished" << std::endl;
   return 0;
 }

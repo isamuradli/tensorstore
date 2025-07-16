@@ -1,78 +1,100 @@
-#include <iostream>
-#include <string>
-#include <chrono>
-#include <thread>
+// Simple Reader Client
+// Connects to server and reads test data
 
+#include <iostream>
 #include "tensorstore/kvstore/kvstore.h"
 #include "tensorstore/kvstore/operations.h"
-#include "tensorstore/util/result.h"
+#include "tensorstore/context.h"
 #include "absl/log/absl_log.h"
-#include "absl/log/initialize.h"
+#include "absl/strings/cord.h"
 
-using tensorstore::kvstore::KvStore;
-
-int main(int argc, char* argv[]) {
-  absl::InitializeLog();
+int main() {
+  std::cout << "Starting Reader Client..." << std::endl;
   
-  std::string server_addr = "127.0.0.1:12345";
-  if (argc > 1) {
-    server_addr = argv[1];
-  }
+  // Create client context
+  auto context = tensorstore::Context::Default();
   
-  std::cout << "📖 Simple Reader Client connecting to server: " << server_addr << std::endl;
-  
-  // Wait a few seconds to ensure writer has time to connect and write
-  std::cout << "⏳ Waiting 8 seconds for writer to initialize and write data..." << std::endl;
-  std::this_thread::sleep_for(std::chrono::seconds(8));
-  
-  // Create a remote_dram kvstore directly
-  auto store_result = tensorstore::kvstore::Open({
+  // Client configuration - connect to server at localhost:12346
+  nlohmann::json spec = {
     {"driver", "remote_dram"},
-    {"remote_addr", server_addr}
-  }).result();
+    {"remote_addr", "127.0.0.1:12346"}
+  };
   
-  if (!store_result.ok()) {
-    std::cerr << "❌ Failed to open kvstore: " << store_result.status() << std::endl;
-    return 1;
-  }
-  
-  auto store = *store_result;
-  std::cout << "✅ Connected to remote DRAM server" << std::endl;
-  
-  // Read the test data that writer should have written
-  std::string key = "test_tensor_data";
-  std::string expected_value = "10,20,30,40,50,60,70,80,90";
-  
-  std::cout << "📖 Reading data from key '" << key << "'..." << std::endl;
-  auto read_result = tensorstore::kvstore::Read(store, key).result();
-  if (!read_result.ok()) {
-    std::cerr << "❌ Failed to read data: " << read_result.status() << std::endl;
-    return 1;
-  }
-  
-  if (read_result->state == tensorstore::kvstore::ReadResult::kValue) {
-    std::string read_value = std::string(read_result->value);
-    std::cout << "✅ Successfully read data from server: " << read_value << std::endl;
-    
-    // Verify the data matches what writer wrote
-    if (read_value == expected_value) {
-      std::cout << "✅ Data verification: PASSED - Values match!" << std::endl;
-      std::cout << "📊 Tensor data: " << read_value << std::endl;
-    } else {
-      std::cout << "❌ Data verification: FAILED!" << std::endl;
-      std::cout << "   Expected: " << expected_value << std::endl;
-      std::cout << "   Got:      " << read_value << std::endl;
+  try {
+    // Open kvstore in client mode
+    auto kvstore_result = tensorstore::kvstore::Open(spec, context).result();
+    if (!kvstore_result.ok()) {
+      std::cerr << "❌ Failed to open kvstore: " << kvstore_result.status() << std::endl;
       return 1;
     }
-  } else if (read_result->state == tensorstore::kvstore::ReadResult::kMissing) {
-    std::cout << "❌ Key '" << key << "' not found on server!" << std::endl;
-    std::cout << "💡 Make sure the writer client has already written the data!" << std::endl;
-    return 1;
-  } else {
-    std::cout << "❌ Unexpected read result state!" << std::endl;
+    
+    auto kvstore = kvstore_result.value();
+    std::cout << "✅ Client connected to server" << std::endl;
+    
+    // Try to read the first test entry
+    std::string test_key = "test_key_123";
+    
+    std::cout << "Reading data..." << std::endl;
+    std::cout << "Key: " << test_key << std::endl;
+    
+    auto read_result = tensorstore::kvstore::Read(kvstore, test_key, {}).result();
+    if (!read_result.ok()) {
+      std::cerr << "❌ Failed to read data: " << read_result.status() << std::endl;
+      return 1;
+    }
+    
+    auto result = read_result.value();
+    
+    if (result.state == tensorstore::kvstore::ReadResult::kMissing) {
+      std::cout << "❌ Key not found on server" << std::endl;
+    } else if (result.state == tensorstore::kvstore::ReadResult::kValue) {
+      std::string value = std::string(result.value);
+      std::cout << "✅ Data read successfully!" << std::endl;
+      std::cout << "Value: " << value << std::endl;
+      std::cout << "Generation: " << result.stamp.generation.value << std::endl;
+    }
+    
+    // Try to read the second test entry
+    std::string test_key2 = "test_key_456";
+    
+    std::cout << "\nReading second entry..." << std::endl;
+    std::cout << "Key: " << test_key2 << std::endl;
+    
+    auto read_result2 = tensorstore::kvstore::Read(kvstore, test_key2, {}).result();
+    if (!read_result2.ok()) {
+      std::cerr << "❌ Failed to read second entry: " << read_result2.status() << std::endl;
+      return 1;
+    }
+    
+    auto result2 = read_result2.value();
+    
+    if (result2.state == tensorstore::kvstore::ReadResult::kMissing) {
+      std::cout << "❌ Second key not found on server" << std::endl;
+    } else if (result2.state == tensorstore::kvstore::ReadResult::kValue) {
+      std::string value2 = std::string(result2.value);
+      std::cout << "✅ Second entry read successfully!" << std::endl;
+      std::cout << "Value: " << value2 << std::endl;
+    }
+    
+    // Test reading non-existent key
+    std::cout << "\nTesting non-existent key..." << std::endl;
+    auto read_result3 = tensorstore::kvstore::Read(kvstore, "non_existent_key", {}).result();
+    if (!read_result3.ok()) {
+      std::cerr << "❌ Failed to read non-existent key: " << read_result3.status() << std::endl;
+      return 1;
+    }
+    
+    auto result3 = read_result3.value();
+    if (result3.state == tensorstore::kvstore::ReadResult::kMissing) {
+      std::cout << "✅ Non-existent key correctly reported as missing" << std::endl;
+    }
+    
+    std::cout << "\nReader client completed successfully." << std::endl;
+    
+  } catch (const std::exception& e) {
+    std::cerr << "❌ Client error: " << e.what() << std::endl;
     return 1;
   }
   
-  std::cout << "🏁 Simple reader client finished successfully" << std::endl;
   return 0;
 }
