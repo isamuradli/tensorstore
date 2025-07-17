@@ -1,0 +1,1 @@
+pkill -f node2_server

@@ -119,8 +119,38 @@ void SendCallback(void* request, ucs_status_t status, void* user_data) {
     absl::OkStatus() : 
     absl::InternalError(absl::StrFormat("UCX send failed: %s", ucs_status_string(status)));
   
-  UcxManager::Instance().CompletePendingOperation(request_id, result_status);
+  // Schedule completion to avoid deadlock in callback
+  std::thread([request_id, result_status]() {
+    UcxManager::Instance().CompletePendingOperation(request_id, result_status);
+  }).detach();
+  
   ucp_request_free(request);
+}
+
+/// Connection callback for server-side client connections
+void UcxListenerCallback(ucp_conn_request_h conn_request, void* user_data) {
+  ABSL_LOG(INFO) << "UCX listener received connection request";
+  
+  // Accept the connection request
+  ucp_ep_params_t ep_params;
+  memset(&ep_params, 0, sizeof(ep_params));
+  ep_params.field_mask = UCP_EP_PARAM_FIELD_CONN_REQUEST;
+  ep_params.conn_request = conn_request;
+  
+  ucp_ep_h server_endpoint;
+  ucs_status_t status = ucp_ep_create(UcxManager::Instance().GetWorker(), &ep_params, &server_endpoint);
+  
+  if (status != UCS_OK) {
+    ABSL_LOG(ERROR) << "Failed to create server endpoint: " << ucs_status_string(status);
+    return;
+  }
+  
+  ABSL_LOG(INFO) << "Server endpoint created successfully for incoming connection";
+  
+  // Schedule endpoint registration to avoid deadlock
+  std::thread([server_endpoint]() {
+    UcxManager::Instance().RegisterServerEndpoint(server_endpoint);
+  }).detach();
 }
 
 /// Receive completion callback for server-side message handling
@@ -151,13 +181,9 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       ABSL_LOG(INFO) << "Server stored key-value pair: key='" << key 
                      << "', value_size=" << value.size();
       
-      // Send write response back to client
-      ucp_ep_h client_endpoint = UcxManager::Instance().GetClientEndpoint();
-      if (client_endpoint) {
-        UcxManager::Instance().SendWriteResponse(client_endpoint, header->request_id, 0);
-      } else {
-        ABSL_LOG(ERROR) << "No client endpoint available to send write response";
-      }
+      // TODO: Send write response back to client
+      // For now, just log the successful write
+      ABSL_LOG(INFO) << "Write request completed for key: " << key;
       
     } else if (header->type == MessageType::READ_REQUEST) {
       // Handle read request
@@ -176,20 +202,19 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
         ABSL_LOG(INFO) << "Server key '" << key << "' not found";
       }
       
-      // Send read response back to client
-      ucp_ep_h client_endpoint = UcxManager::Instance().GetClientEndpoint();
-      if (client_endpoint) {
-        UcxManager::Instance().SendReadResponse(client_endpoint, header->request_id, value);
-      } else {
-        ABSL_LOG(ERROR) << "No client endpoint available to send read response";
-      }
+      // TODO: Send read response back to client
+      // For now, just log the successful read
+      ABSL_LOG(INFO) << "Read request completed for key: " << key;
     }
     
     // Only post another receive buffer if we're not shutting down
     // Check if UCX manager is still active before posting new receive
     auto& ucx_manager = UcxManager::Instance();
     if (ucx_manager.GetContext() && ucx_manager.GetWorker()) {
-      ucx_manager.PostServerReceive();
+      // Schedule posting to avoid deadlock in callback
+      std::thread([&ucx_manager]() {
+        ucx_manager.PostServerReceive();
+      }).detach();
     }
   } else {
     ABSL_LOG(ERROR) << "Failed to receive message: " << ucs_status_string(status);
@@ -257,36 +282,6 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
   ucp_request_free(request);
 }
 
-/// UCX listener callback for incoming connections
-void UcxListenerCallback(ucp_conn_request_h conn_request, void* user_data) {
-  ABSL_LOG(INFO) << "UCX: New client connection request received";
-  
-  // Accept the connection request and create an endpoint for the client
-  ucp_ep_params_t ep_params;
-  memset(&ep_params, 0, sizeof(ep_params));
-  
-  ep_params.field_mask = UCP_EP_PARAM_FIELD_CONN_REQUEST |
-                         UCP_EP_PARAM_FIELD_ERR_HANDLER |
-                         UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE;
-  ep_params.conn_request = conn_request;
-  ep_params.err_mode = UCP_ERR_HANDLING_MODE_PEER;
-  ep_params.err_handler.cb = UcxErrorHandler;
-  ep_params.err_handler.arg = nullptr;
-  
-  ucp_ep_h client_endpoint;
-  auto& ucx_manager = UcxManager::Instance();
-  ucs_status_t status = ucp_ep_create(ucx_manager.GetWorker(), &ep_params, &client_endpoint);
-  
-  if (status != UCS_OK) {
-    ABSL_LOG(ERROR) << "Failed to create server endpoint for client: " << ucs_status_string(status);
-    return;
-  }
-  
-  ABSL_LOG(INFO) << "Created server endpoint for client connection";
-  
-  // Register the client endpoint for response handling
-  ucx_manager.RegisterClientEndpoint(client_endpoint);
-}
 
 /// Send a notification to the server process that new data has been written
 void NotifyServerOfNewData(const kvstore::Key& key, const absl::Cord& value) {
@@ -370,7 +365,8 @@ absl::Status UcxManager::Initialize() {
   
   // Use features that support local communication (shared memory) and networking
   ucp_params.features = UCP_FEATURE_TAG | 
-                        UCP_FEATURE_WAKEUP;
+                        UCP_FEATURE_WAKEUP |
+                        UCP_FEATURE_AM;
   
   ucp_params.tag_sender_mask = 0xffff000000000000ULL;  // Use upper 16 bits for sender ID
   
@@ -522,25 +518,7 @@ Result<ucp_ep_h> UcxManager::CreateClientEndpoint(const std::string& server_addr
   
   ABSL_LOG(INFO) << "Creating UCX client endpoint to: " << server_addr;
   
-  // Check if this is a localhost connection
-  bool is_localhost = (server_addr.find("127.0.0.1") != std::string::npos ||
-                      server_addr.find("localhost") != std::string::npos);
-  
-  if (is_localhost) {
-    ABSL_LOG(INFO) << "Detected localhost connection - using local IPC mode for testing";
-    
-    // For localhost testing, create a dummy endpoint that represents local communication
-    // This allows us to test the basic functionality without complex UCX networking
-    ucp_ep_h dummy_endpoint = reinterpret_cast<ucp_ep_h>(0xDEADBEEFULL);  // Local comm marker
-    
-    // Register this endpoint for cleanup
-    RegisterClientSideEndpointNoLock(dummy_endpoint);
-    
-    ABSL_LOG(INFO) << "Created localhost client endpoint for testing";
-    return dummy_endpoint;
-  }
-  
-  // For real multi-node connections, use full UCX with socket addresses
+  // Force real UCX networking for all connections (localhost and remote)
   // Parse server address
   size_t colon_pos = server_addr.find(':');
   if (colon_pos == std::string::npos) {
@@ -580,14 +558,11 @@ Result<ucp_ep_h> UcxManager::CreateClientEndpoint(const std::string& server_addr
   ucp_ep_params_t ep_params;
   memset(&ep_params, 0, sizeof(ep_params));
   
-  ep_params.field_mask = UCP_EP_PARAM_FIELD_SOCK_ADDR |
-                         UCP_EP_PARAM_FIELD_ERR_HANDLER |
-                         UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE;
+  // Use socket address with proper field mask
+  ep_params.field_mask = UCP_EP_PARAM_FIELD_SOCK_ADDR | UCP_EP_PARAM_FIELD_FLAGS;
   ep_params.sockaddr.addr = (const struct sockaddr*)&server_sockaddr;
   ep_params.sockaddr.addrlen = sizeof(server_sockaddr);
-  ep_params.err_mode = UCP_ERR_HANDLING_MODE_PEER;
-  ep_params.err_handler.cb = UcxErrorHandler;
-  ep_params.err_handler.arg = nullptr;
+  ep_params.flags = UCP_EP_PARAMS_FLAGS_CLIENT_SERVER;
   
   ABSL_LOG(INFO) << "Attempting to create UCX client endpoint with socket connection";
   ABSL_LOG(INFO) << "  Server address: " << server_addr;
@@ -659,6 +634,12 @@ void UcxManager::RegisterClientEndpoint(ucp_ep_h client_endpoint) {
   absl::MutexLock lock(&mutex_);
   client_endpoints_.push_back(client_endpoint);
   ABSL_LOG(INFO) << "Registered client endpoint, total clients: " << client_endpoints_.size();
+}
+
+void UcxManager::RegisterServerEndpoint(ucp_ep_h server_endpoint) {
+  absl::MutexLock lock(&mutex_);
+  server_endpoints_.push_back(server_endpoint);
+  ABSL_LOG(INFO) << "Registered server endpoint, total server endpoints: " << server_endpoints_.size();
 }
 
 void UcxManager::RegisterClientSideEndpoint(ucp_ep_h client_endpoint) {
@@ -957,11 +938,9 @@ void UcxManager::Shutdown() {
   
   // Clean up client-side endpoints
   for (ucp_ep_h client_side_endpoint : client_side_endpoints_) {
-    if (client_side_endpoint && client_side_endpoint != reinterpret_cast<ucp_ep_h>(0xDEADBEEFULL)) {
+    if (client_side_endpoint) {
       ABSL_LOG(INFO) << "Destroying client-side endpoint";
       ucp_ep_destroy(client_side_endpoint);
-    } else if (client_side_endpoint == reinterpret_cast<ucp_ep_h>(0xDEADBEEFULL)) {
-      ABSL_LOG(INFO) << "Skipping cleanup of localhost dummy endpoint";
     }
   }
   client_side_endpoints_.clear();
@@ -1102,26 +1081,7 @@ class RemoteDramDriver
       return absl::InternalError("Client endpoint not available");
     }
     
-    // Check if this is a localhost dummy endpoint
-    if (client_endpoint_ == reinterpret_cast<ucp_ep_h>(0xDEADBEEFULL)) {
-      ABSL_LOG(INFO) << "WriteRemote using localhost IPC for key '" << key << "' with " << value.size() << " bytes";
-      
-      // For localhost testing, directly store in the local server's storage
-      // This simulates the inter-process communication without complex networking
-      auto& storage = UcxManager::Instance().GetStorage();
-      storage.Store(key, value);
-      
-      // Notify the actual server process via TCP (server will print the data)
-      NotifyServerOfNewData(key, value);
-      
-      // Return success immediately
-      TimestampedStorageGeneration result;
-      result.generation = StorageGeneration::FromString("localhost_write");
-      result.time = absl::Now();
-      return MakeReadyFuture<TimestampedStorageGeneration>(result);
-    }
-    
-    // For real multi-node connections, use full UCX networking
+    // Use UCX networking for all connections
     auto& ucx_manager = UcxManager::Instance();
     uint64_t request_id = ucx_manager.GenerateRequestId();
     
@@ -1233,32 +1193,7 @@ class RemoteDramDriver
       return MakeReadyFuture<kvstore::ReadResult>(std::move(result));
     }
     
-    // Check if this is a localhost dummy endpoint
-    if (client_endpoint_ == reinterpret_cast<ucp_ep_h>(0xDEADBEEFULL)) {
-      ABSL_LOG(INFO) << "ReadRemote using localhost IPC for key '" << key << "'";
-      
-      // For localhost testing, directly read from the local server's storage
-      auto& storage = UcxManager::Instance().GetStorage();
-      auto value = storage.Get(key);
-      
-      kvstore::ReadResult result;
-      if (value.has_value()) {
-        result.state = kvstore::ReadResult::kValue;
-        result.value = *value;
-        result.stamp.generation = StorageGeneration::FromString("localhost_read");
-        result.stamp.time = absl::Now();
-        ABSL_LOG(INFO) << "ReadRemote localhost: found key '" << key << "' with value size=" << value->size();
-      } else {
-        result.state = kvstore::ReadResult::kMissing;
-        result.stamp.generation = StorageGeneration::NoValue();
-        result.stamp.time = absl::Now();
-        ABSL_LOG(INFO) << "ReadRemote localhost: key '" << key << "' not found";
-      }
-      
-      return MakeReadyFuture<kvstore::ReadResult>(std::move(result));
-    }
-    
-    // For real multi-node connections, use full UCX networking
+    // Use UCX networking for all connections
     auto& ucx_manager = UcxManager::Instance();
     uint64_t request_id = ucx_manager.GenerateRequestId();
     
