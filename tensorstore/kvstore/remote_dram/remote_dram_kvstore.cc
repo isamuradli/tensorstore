@@ -22,6 +22,8 @@
 #include <cstring>
 #include <vector>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 
 // System includes for socket operations
 #include <arpa/inet.h>
@@ -111,17 +113,35 @@ namespace jb = tensorstore::internal_json_binding;
 
 /// Send completion callback for UCX operations
 void SendCallback(void* request, ucs_status_t status, void* user_data) {
-  uint64_t request_id = reinterpret_cast<uint64_t>(user_data);
+  // Handle the new user_data structure
+  struct SendUserData {
+    uint64_t request_id;
+    char* buffer_to_free;
+  };
+  
+  SendUserData* data = static_cast<SendUserData*>(user_data);
+  uint64_t request_id = data->request_id;
+  char* buffer_to_free = data->buffer_to_free;
+  
   ABSL_LOG(INFO) << "UCX send completed for request " << request_id 
                  << " with status: " << ucs_status_string(status);
+  
+  if (status == UCS_OK) {
+    std::cout << "✅ UCX: Send completed successfully [ID:" << request_id << "]" << std::endl;
+  } else {
+    std::cout << "❌ UCX: Send failed [ID:" << request_id << "] - " << ucs_status_string(status) << std::endl;
+  }
   
   absl::Status result_status = (status == UCS_OK) ? 
     absl::OkStatus() : 
     absl::InternalError(absl::StrFormat("UCX send failed: %s", ucs_status_string(status)));
   
   // Schedule completion to avoid deadlock in callback
-  std::thread([request_id, result_status]() {
+  std::thread([request_id, result_status, buffer_to_free, data]() {
     UcxManager::Instance().CompletePendingOperation(request_id, result_status);
+    // Free the buffer and user_data after completing the operation
+    delete[] buffer_to_free;
+    delete data;
   }).detach();
   
   ucp_request_free(request);
@@ -161,17 +181,97 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
   char* buffer = static_cast<char*>(user_data);
   
   if (status == UCS_OK && info->length >= sizeof(MessageHeader)) {
+    // Log message for debugging
+    message_utils::LogMessageBuffer(buffer, info->length, "Server received message");
+    
     // Process the received message
     MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer);
     
-    ABSL_LOG(INFO) << "Received message: type=" << static_cast<uint32_t>(header->type)
+    // Verify message integrity
+    if (!message_utils::VerifyMessageHeader(header, info->length)) {
+      ABSL_LOG(ERROR) << "Message integrity verification failed, discarding message";
+      delete[] buffer;
+      if (request != nullptr) {
+        ucp_request_free(request);
+      }
+      return;
+    }
+    
+    size_t header_offset = 0;  // No offset needed with proper buffer management
+    
+    ABSL_LOG(INFO) << "Received message: magic=" << std::dec << header->magic_number
+                   << ", type=" << static_cast<uint32_t>(header->type)
                    << ", key_len=" << header->key_length 
                    << ", value_len=" << header->value_length
-                   << ", request_id=" << header->request_id;
+                   << ", request_id=" << header->request_id
+                   << ", checksum=" << header->checksum;
+    
+    // Try to extract readable content from the message payload
+    // Skip the header and look for the actual key-value data
+    if (info->length > sizeof(MessageHeader)) {
+      const char* payload = buffer + sizeof(MessageHeader);
+      size_t payload_size = info->length - sizeof(MessageHeader);
+      
+      // Look for the key-value pattern: should be "node1_test" followed by "Data from Node 1"
+      std::string payload_str(payload, payload_size);
+      ABSL_LOG(INFO) << "Raw payload content: '" << payload_str << "'";
+      
+      // Try to find readable strings in the payload
+      std::string readable_payload;
+      for (size_t i = 0; i < payload_size; ++i) {
+        char c = payload[i];
+        if (c >= 32 && c <= 126) {  // Printable ASCII
+          readable_payload += c;
+        } else if (c == 0) {
+          readable_payload += " [NULL] ";
+        } else {
+          readable_payload += " [" + std::to_string(static_cast<unsigned char>(c)) + "] ";
+        }
+      }
+      ABSL_LOG(INFO) << "Readable payload: " << readable_payload;
+      
+      // Try to find the expected key and value strings in the buffer
+      std::string expected_key = "node1_test";
+      std::string expected_value = "Data from Node 1";
+      
+      // Search for the key string
+      std::string entire_buffer(buffer, info->length);
+      size_t key_pos = entire_buffer.find(expected_key);
+      size_t value_pos = entire_buffer.find(expected_value);
+      
+      if (key_pos != std::string::npos) {
+        ABSL_LOG(INFO) << "Found expected key '" << expected_key << "' at position " << key_pos;
+      }
+      if (value_pos != std::string::npos) {
+        ABSL_LOG(INFO) << "Found expected value '" << expected_value << "' at position " << value_pos;
+      }
+      
+      if (key_pos != std::string::npos && value_pos != std::string::npos) {
+        ABSL_LOG(INFO) << "SUCCESS: Both key and value found in received buffer!";
+        ABSL_LOG(INFO) << "  Key: '" << expected_key << "' at position " << key_pos;
+        ABSL_LOG(INFO) << "  Value: '" << expected_value << "' at position " << value_pos;
+      }
+    }
     
     if (header->type == MessageType::WRITE_REQUEST) {
       // Handle write request
-      const char* data_ptr = buffer + sizeof(MessageHeader);
+      const char* data_ptr = buffer + header_offset + sizeof(MessageHeader);
+      
+      // Verify payload checksum
+      if (header->checksum != 0) {
+        uint32_t calculated_checksum = message_utils::CalculateChecksum(data_ptr, 
+                                                                       header->key_length + header->value_length);
+        if (calculated_checksum != header->checksum) {
+          ABSL_LOG(ERROR) << "Payload checksum mismatch: expected " << std::dec << header->checksum
+                          << ", calculated " << std::dec << calculated_checksum;
+          delete[] buffer;
+          if (request != nullptr) {
+            ucp_request_free(request);
+          }
+          return;
+        }
+      }
+      
       std::string key(data_ptr, header->key_length);
       absl::Cord value(std::string(data_ptr + header->key_length, header->value_length));
       
@@ -181,16 +281,21 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       ABSL_LOG(INFO) << "Server stored key-value pair: key='" << key 
                      << "', value_size=" << value.size();
       
+      std::cout << "📥 SERVER: Received write request [ID:" << header->request_id << "] key='" << key 
+                << "' value='" << std::string(value) << "' - STORED SUCCESS" << std::endl;
+      
       // TODO: Send write response back to client
       // For now, just log the successful write
       ABSL_LOG(INFO) << "Write request completed for key: " << key;
       
     } else if (header->type == MessageType::READ_REQUEST) {
       // Handle read request
-      const char* data_ptr = buffer + sizeof(MessageHeader);
+      const char* data_ptr = buffer + header_offset + sizeof(MessageHeader);
       std::string key(data_ptr, header->key_length);
       
       ABSL_LOG(INFO) << "Server received read request for key='" << key << "'";
+      
+      std::cout << "📬 SERVER: Received read request [ID:" << header->request_id << "] key='" << key << "'" << std::endl;
       
       // Look up the key in storage
       auto& storage = UcxManager::Instance().GetStorage();
@@ -198,13 +303,21 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       
       if (value.has_value()) {
         ABSL_LOG(INFO) << "Server found key '" << key << "' with value size=" << value->size();
+        std::cout << "📤 SERVER: Found key '" << key << "' [ID:" << header->request_id << "] - sending response with " << value->size() << " bytes" << std::endl;
       } else {
         ABSL_LOG(INFO) << "Server key '" << key << "' not found";
+        std::cout << "❌ SERVER: Key '" << key << "' not found [ID:" << header->request_id << "]" << std::endl;
       }
       
-      // TODO: Send read response back to client
-      // For now, just log the successful read
-      ABSL_LOG(INFO) << "Read request completed for key: " << key;
+      // Send read response back to client
+      auto& ucx_manager = UcxManager::Instance();
+      ucp_ep_h client_endpoint = ucx_manager.GetClientEndpoint();
+      if (client_endpoint) {
+        ucx_manager.SendReadResponse(client_endpoint, header->request_id, value);
+        ABSL_LOG(INFO) << "Sent read response for key: " << key;
+      } else {
+        ABSL_LOG(ERROR) << "No client endpoint available to send read response for key: " << key;
+      }
     }
     
     // Only post another receive buffer if we're not shutting down
@@ -256,12 +369,14 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       result.stamp.generation = StorageGeneration::FromString("remote_read");
       result.stamp.time = absl::Now();
       ABSL_LOG(INFO) << "Read successful, value size=" << result.value.size();
+      std::cout << "📥 CLIENT: Read response [ID:" << response->header.request_id << "] SUCCESS - received " << result.value.size() << " bytes" << std::endl;
     } else {
       // Key not found or error
       result.state = kvstore::ReadResult::kMissing;
       result.stamp.generation = StorageGeneration::NoValue();
       result.stamp.time = absl::Now();
       ABSL_LOG(INFO) << "Read result: key not found";
+      std::cout << "❌ CLIENT: Read response [ID:" << response->header.request_id << "] KEY NOT FOUND" << std::endl;
     }
     
     // Complete the pending read operation
@@ -334,6 +449,109 @@ void NotifyServerOfNewData(const kvstore::Key& key, const absl::Cord& value) {
 
 }  // namespace
 
+// Message utility functions implementation
+namespace message_utils {
+
+uint32_t CalculateChecksum(const void* data, size_t size) {
+  uint32_t checksum = 0;
+  const uint8_t* bytes = static_cast<const uint8_t*>(data);
+  for (size_t i = 0; i < size; ++i) {
+    checksum = (checksum << 1) ^ bytes[i];
+  }
+  return checksum;
+}
+
+bool VerifyMessageHeader(const MessageHeader* header, size_t total_message_size) {
+  if (!header) {
+    ABSL_LOG(ERROR) << "Message header is null";
+    return false;
+  }
+  
+  // Check magic number
+  if (header->magic_number != MESSAGE_MAGIC_NUMBER) {
+    ABSL_LOG(ERROR) << "Invalid magic number: expected " << std::dec << MESSAGE_MAGIC_NUMBER
+                    << ", got " << std::dec << header->magic_number;
+    return false;
+  }
+  
+  // Check message type
+  if (header->type != MessageType::WRITE_REQUEST && 
+      header->type != MessageType::WRITE_RESPONSE &&
+      header->type != MessageType::READ_REQUEST &&
+      header->type != MessageType::READ_RESPONSE) {
+    ABSL_LOG(ERROR) << "Invalid message type: " << static_cast<uint32_t>(header->type);
+    return false;
+  }
+  
+  // Check total message size consistency
+  size_t expected_size = sizeof(MessageHeader) + header->key_length + header->value_length;
+  if (total_message_size < expected_size) {
+    ABSL_LOG(ERROR) << "Message size mismatch: expected at least " << expected_size
+                    << " bytes, got " << total_message_size;
+    return false;
+  }
+  
+  return true;
+}
+
+void InitializeMessageHeader(MessageHeader* header, MessageType type, 
+                            uint32_t key_length, uint32_t value_length, 
+                            uint64_t request_id, const void* payload_data) {
+  header->magic_number = MESSAGE_MAGIC_NUMBER;
+  header->type = type;
+  header->key_length = key_length;
+  header->value_length = value_length;
+  header->request_id = request_id;
+  
+  // Calculate checksum for payload data
+  if (payload_data && (key_length + value_length) > 0) {
+    header->checksum = CalculateChecksum(payload_data, key_length + value_length);
+  } else {
+    header->checksum = 0;
+  }
+}
+
+void LogMessageBuffer(const char* buffer, size_t size, const std::string& prefix) {
+  ABSL_LOG(INFO) << prefix << " (" << size << " bytes)";
+  
+  // Log the message header interpretation if present
+  if (size >= sizeof(MessageHeader)) {
+    const MessageHeader* header = reinterpret_cast<const MessageHeader*>(buffer);
+    ABSL_LOG(INFO) << "  Header: magic=" << std::dec << header->magic_number
+                   << ", type=" << static_cast<uint32_t>(header->type)
+                   << ", key_len=" << header->key_length
+                   << ", value_len=" << header->value_length
+                   << ", request_id=" << header->request_id
+                   << ", checksum=" << header->checksum;
+  }
+  
+  // Extract and display the readable payload content
+  if (size > sizeof(MessageHeader)) {
+    const char* payload = buffer + sizeof(MessageHeader);
+    size_t payload_size = size - sizeof(MessageHeader);
+    
+    std::string readable_payload;
+    for (size_t i = 0; i < payload_size && i < 256; ++i) {  // Limit to 256 chars
+      char c = payload[i];
+      if (c >= 32 && c <= 126) {  // Printable ASCII
+        readable_payload += c;
+      } else if (c == 0) {
+        readable_payload += "<NULL>";
+      } else {
+        readable_payload += "<" + std::to_string(static_cast<unsigned char>(c)) + ">";
+      }
+    }
+    
+    if (payload_size > 256) {
+      readable_payload += "...";
+    }
+    
+    ABSL_LOG(INFO) << "  Payload: " << readable_payload;
+  }
+}
+
+}  // namespace message_utils
+
 // UcxManager Implementation
 UcxManager& UcxManager::Instance() {
   static UcxManager instance;
@@ -361,14 +579,19 @@ absl::Status UcxManager::Initialize() {
   
   // Set UCX context parameters with tagged messaging support
   ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES | 
-                          UCP_PARAM_FIELD_TAG_SENDER_MASK;
+                          UCP_PARAM_FIELD_TAG_SENDER_MASK |
+                          UCP_PARAM_FIELD_REQUEST_SIZE |
+                          UCP_PARAM_FIELD_REQUEST_INIT;
   
   // Use features that support local communication (shared memory) and networking
   ucp_params.features = UCP_FEATURE_TAG | 
                         UCP_FEATURE_WAKEUP |
-                        UCP_FEATURE_AM;
+                        UCP_FEATURE_AM |
+                        UCP_FEATURE_RMA;  // Remote Memory Access for better performance
   
-  ucp_params.tag_sender_mask = 0xffff000000000000ULL;  // Use upper 16 bits for sender ID
+  ucp_params.tag_sender_mask = 0xF000000000000000ULL;  // Use upper 4 bits for message type
+  ucp_params.request_size = 0;  // Use default request size
+  ucp_params.request_init = nullptr;  // No request initialization
   
   // Create UCX context
   status = ucp_init(&ucp_params, config, &context_);
@@ -381,8 +604,11 @@ absl::Status UcxManager::Initialize() {
   
   // Create UCX worker with socket support
   ucp_worker_params_t worker_params;
-  worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
+  worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE |
+                             UCP_WORKER_PARAM_FIELD_CPU_MASK;
   worker_params.thread_mode = UCS_THREAD_MODE_MULTI;
+  // Use default CPU mask (all CPUs available)
+  UCS_CPU_ZERO(&worker_params.cpu_mask);
   
   status = ucp_worker_create(context_, &worker_params, &worker_);
   if (status != UCS_OK) {
@@ -675,7 +901,7 @@ void UcxManager::PostServerReceive() {
   recv_params.user_data = recv_buffer;
   
   ucp_tag_t tag = 0;  // Accept any tag for now
-  ucp_tag_t tag_mask = 0;
+  ucp_tag_t tag_mask = 0;  // Accept any tag - server handles all message types
   
   ucp_worker_h worker_handle;
   {
@@ -721,7 +947,7 @@ void UcxManager::PostServerReceiveNoLock() {
   recv_params.user_data = recv_buffer;
   
   ucp_tag_t tag = 0;  // Accept any tag for now
-  ucp_tag_t tag_mask = 0;
+  ucp_tag_t tag_mask = 0;  // Accept any tag - server handles all message types
   
   if (!worker_) {
     ABSL_LOG(ERROR) << "Cannot post server receive: worker is null";
@@ -819,7 +1045,7 @@ void UcxManager::SendReadResponse(ucp_ep_h client_endpoint, uint64_t request_id,
     ucp_request_free(request);
   };
   
-  ucp_tag_t tag = 1;  // Use tag 1 for read responses
+  ucp_tag_t tag = UCX_TAG_READ_RESPONSE;  // Use distinct tag for read responses
   
   void* request = ucp_tag_send_nbx(client_endpoint, response_buffer.data(), 
                                    message_size, tag, &send_params);
@@ -857,7 +1083,7 @@ void UcxManager::SendWriteResponse(ucp_ep_h client_endpoint, uint64_t request_id
     ucp_request_free(request);
   };
   
-  ucp_tag_t tag = 0;  // Use tag 0 for write responses
+  ucp_tag_t tag = UCX_TAG_WRITE_RESPONSE;  // Use distinct tag for write responses
   
   void* request = ucp_tag_send_nbx(client_endpoint, &response, sizeof(response), 
                                    tag, &send_params);
@@ -1091,13 +1317,7 @@ class RemoteDramDriver
     size_t message_size = sizeof(MessageHeader) + key.size() + value.size();
     std::vector<char> message_buffer(message_size);
     
-    MessageHeader* header = reinterpret_cast<MessageHeader*>(message_buffer.data());
-    header->type = MessageType::WRITE_REQUEST;
-    header->key_length = static_cast<uint32_t>(key.size());
-    header->value_length = static_cast<uint32_t>(value.size());
-    header->request_id = request_id;
-    
-    // Copy key and value data
+    // Copy key and value data first
     char* data_ptr = message_buffer.data() + sizeof(MessageHeader);
     std::memcpy(data_ptr, key.data(), key.size());
     
@@ -1105,7 +1325,26 @@ class RemoteDramDriver
     std::string value_str = std::string(value);
     std::memcpy(data_ptr + key.size(), value_str.data(), value_str.size());
     
+    // Initialize message header with integrity verification
+    MessageHeader* header = reinterpret_cast<MessageHeader*>(message_buffer.data());
+    message_utils::InitializeMessageHeader(header, MessageType::WRITE_REQUEST, 
+                                          static_cast<uint32_t>(key.size()),
+                                          static_cast<uint32_t>(value.size()),
+                                          request_id, data_ptr);
+    
+    // Verify header was initialized correctly
+    ABSL_LOG(INFO) << "Client initialized header: magic=" << std::dec << header->magic_number
+                   << ", type=" << static_cast<uint32_t>(header->type)
+                   << ", key_len=" << header->key_length
+                   << ", value_len=" << header->value_length
+                   << ", request_id=" << header->request_id
+                   << ", checksum=" << header->checksum;
+    
+    // Log message for debugging
+    message_utils::LogMessageBuffer(message_buffer.data(), message_size, "Client sending write request");
+    
     ABSL_LOG(INFO) << "Sending UCX write request: key='" << key << "', value='" << value_str << "', request_id=" << request_id;
+    std::cout << "📤 CLIENT: Sending write request [ID:" << request_id << "] key='" << key << "' value='" << value_str << "'" << std::endl;
     
     // Create promise/future pair
     auto [promise, future] = PromiseFuturePair<void>::Make();
@@ -1115,13 +1354,32 @@ class RemoteDramDriver
     
     // Send message using UCX tagged messaging
     ucp_request_param_t send_params;
+    memset(&send_params, 0, sizeof(send_params));  // Initialize all fields to zero
     send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
     send_params.cb.send = SendCallback;
     send_params.user_data = reinterpret_cast<void*>(request_id);
     
-    ucp_tag_t tag = 0;  // Use tag 0 for write operations
+    ucp_tag_t tag = UCX_TAG_WRITE_REQUEST;  // Use distinct tag for write operations
     
-    void* request = ucp_tag_send_nbx(client_endpoint_, message_buffer.data(), 
+    // Allocate a stable buffer that will survive until the send completes
+    char* stable_buffer = new char[message_size];
+    std::memcpy(stable_buffer, message_buffer.data(), message_size);
+    
+    ABSL_LOG(INFO) << "About to send: buffer_ptr=" << static_cast<void*>(stable_buffer)
+                   << ", size=" << message_size << ", tag=" << std::dec << tag;
+    
+    // Double-check the buffer contents before sending
+    message_utils::LogMessageBuffer(stable_buffer, message_size, "Final buffer before UCX send");
+    
+    // Store the buffer pointer in user_data so we can free it in the callback
+    struct SendUserData {
+      uint64_t request_id;
+      char* buffer_to_free;
+    };
+    SendUserData* user_data = new SendUserData{request_id, stable_buffer};
+    send_params.user_data = user_data;
+    
+    void* request = ucp_tag_send_nbx(client_endpoint_, stable_buffer, 
                                      message_size, tag, &send_params);
     
     if (UCS_PTR_IS_ERR(request)) {
@@ -1130,13 +1388,20 @@ class RemoteDramDriver
       ucx_manager.CompletePendingOperation(request_id, 
           absl::InternalError(absl::StrFormat("UCX send failed: %s", 
               ucs_status_string(error_status))));
+      // Clean up resources
+      delete[] stable_buffer;
+      delete user_data;
     } else if (request == nullptr) {
       // Send completed immediately
       ABSL_LOG(INFO) << "UCX write request sent immediately for request_id=" << request_id;
       ucx_manager.CompletePendingOperation(request_id, absl::OkStatus());
+      // Clean up resources
+      delete[] stable_buffer;
+      delete user_data;
     } else {
       // Send is in progress, will complete asynchronously via SendCallback
       ABSL_LOG(INFO) << "UCX write request in progress for request_id=" << request_id;
+      // Resources will be cleaned up in SendCallback
     }
     
     // Transform the void future to TimestampedStorageGeneration future
@@ -1203,17 +1468,22 @@ class RemoteDramDriver
     size_t message_size = sizeof(MessageHeader) + key.size();
     std::vector<char> message_buffer(message_size);
     
-    MessageHeader* header = reinterpret_cast<MessageHeader*>(message_buffer.data());
-    header->type = MessageType::READ_REQUEST;
-    header->key_length = static_cast<uint32_t>(key.size());
-    header->value_length = 0;  // No value in read request
-    header->request_id = request_id;
-    
-    // Copy key data
+    // Copy key data first
     char* data_ptr = message_buffer.data() + sizeof(MessageHeader);
     std::memcpy(data_ptr, key.data(), key.size());
     
+    // Initialize message header with integrity verification
+    MessageHeader* header = reinterpret_cast<MessageHeader*>(message_buffer.data());
+    message_utils::InitializeMessageHeader(header, MessageType::READ_REQUEST, 
+                                          static_cast<uint32_t>(key.size()),
+                                          0,  // No value in read request
+                                          request_id, data_ptr);
+    
+    // Log message buffer for debugging
+    message_utils::LogMessageBuffer(message_buffer.data(), message_size, "Client sending read request");
+    
     ABSL_LOG(INFO) << "Sending UCX read request: key='" << key << "', request_id=" << request_id;
+    std::cout << "📤 CLIENT: Sending read request [ID:" << request_id << "] key='" << key << "'" << std::endl;
     
     // Create promise/future pair for read result
     auto [promise, future] = PromiseFuturePair<kvstore::ReadResult>::Make();
@@ -1226,13 +1496,25 @@ class RemoteDramDriver
     
     // Send read request using UCX tagged messaging
     ucp_request_param_t send_params;
+    memset(&send_params, 0, sizeof(send_params));  // Initialize all fields to zero
     send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
     send_params.cb.send = SendCallback;
-    send_params.user_data = reinterpret_cast<void*>(request_id);
     
-    ucp_tag_t tag = 1;  // Use tag 1 for read operations
+    // Allocate a stable buffer that will survive until the send completes
+    char* stable_buffer = new char[message_size];
+    std::memcpy(stable_buffer, message_buffer.data(), message_size);
     
-    void* request = ucp_tag_send_nbx(client_endpoint_, message_buffer.data(), 
+    // Store the buffer pointer in user_data so we can free it in the callback
+    struct SendUserData {
+      uint64_t request_id;
+      char* buffer_to_free;
+    };
+    SendUserData* user_data = new SendUserData{request_id, stable_buffer};
+    send_params.user_data = user_data;
+    
+    ucp_tag_t tag = UCX_TAG_READ_REQUEST;  // Use distinct tag for read operations
+    
+    void* request = ucp_tag_send_nbx(client_endpoint_, stable_buffer, 
                                      message_size, tag, &send_params);
     
     if (UCS_PTR_IS_ERR(request)) {
@@ -1244,12 +1526,19 @@ class RemoteDramDriver
       error_result.stamp.generation = StorageGeneration::NoValue();
       error_result.stamp.time = absl::Now();
       ucx_manager.CompletePendingReadOperation(request_id, std::move(error_result));
+      // Clean up resources
+      delete[] stable_buffer;
+      delete user_data;
     } else if (request == nullptr) {
       // Send completed immediately - response handling will complete the read
       ABSL_LOG(INFO) << "UCX read request sent immediately for request_id=" << request_id;
+      // Clean up resources
+      delete[] stable_buffer;
+      delete user_data;
     } else {
       // Send is in progress, will complete asynchronously via SendCallback
       ABSL_LOG(INFO) << "UCX read request in progress for request_id=" << request_id;
+      // Resources will be cleaned up in SendCallback
     }
     
     return future;
@@ -1270,8 +1559,8 @@ class RemoteDramDriver
     recv_params.cb.recv = ClientReceiveCallback;
     recv_params.user_data = reinterpret_cast<void*>(request_id);
     
-    ucp_tag_t tag = 1;  // Use tag 1 for read responses
-    ucp_tag_t tag_mask = 0xffff;  // Match tag exactly
+    ucp_tag_t tag = UCX_TAG_READ_RESPONSE;  // Use distinct tag for read responses
+    ucp_tag_t tag_mask = UCX_TAG_MASK;  // Match tag group
     
     void* request = ucp_tag_recv_nbx(ucx_manager.GetWorker(), recv_buffer, max_response_size, 
                                      tag, tag_mask, &recv_params);

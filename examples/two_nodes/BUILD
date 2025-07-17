@@ -44,6 +44,25 @@ tensorstore_cc_binary(
 )
 
 tensorstore_cc_binary(
+    name = "node1_reader",
+    srcs = ["node1_reader.cc"],
+    deps = [
+        "//tensorstore",
+        "//tensorstore:all_drivers",
+        "//tensorstore:array",
+        "//tensorstore:data_type",
+        "//tensorstore:open",
+        "//tensorstore:open_mode",
+        "//tensorstore:spec",
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+        "@abseil-cpp//absl/strings:cord",
+    ],
+)
+
+tensorstore_cc_binary(
     name = "node2_server",
     srcs = ["node2_server.cc"],
     deps = [
@@ -53,6 +72,8 @@ tensorstore_cc_binary(
         "//tensorstore/util:status",
     ],
 )
+
+
 
 tensorstore_cc_binary(
     name = "multi_writer_client",

@@ -41,6 +41,14 @@ namespace tensorstore {
 
 namespace jb = tensorstore::internal_json_binding;
 
+// Constants for message integrity and UCX tags
+constexpr uint32_t MESSAGE_MAGIC_NUMBER = 0xDEADBEEF;
+constexpr ucp_tag_t UCX_TAG_WRITE_REQUEST = 0x1000;
+constexpr ucp_tag_t UCX_TAG_WRITE_RESPONSE = 0x1001;
+constexpr ucp_tag_t UCX_TAG_READ_REQUEST = 0x2000;
+constexpr ucp_tag_t UCX_TAG_READ_RESPONSE = 0x2001;
+constexpr ucp_tag_t UCX_TAG_MASK = 0xF000;
+
 /// Message types for client-server communication
 enum class MessageType : uint32_t {
   WRITE_REQUEST = 1,
@@ -51,10 +59,12 @@ enum class MessageType : uint32_t {
 
 /// Header for all messages
 struct MessageHeader {
+  uint32_t magic_number;   // Magic number for integrity verification
   MessageType type;
   uint32_t key_length;
   uint32_t value_length;
   uint64_t request_id;
+  uint32_t checksum;       // Simple checksum for data integrity
 } __attribute__((packed));
 
 /// Write request message structure
@@ -276,6 +286,23 @@ class UcxManager {
 
 /// Send a notification to the server process that new data has been written
 void NotifyServerOfNewData(const kvstore::Key& key, const absl::Cord& value);
+
+/// Utility functions for message integrity
+namespace message_utils {
+  /// Calculate simple checksum for data integrity
+  uint32_t CalculateChecksum(const void* data, size_t size);
+  
+  /// Verify message header integrity
+  bool VerifyMessageHeader(const MessageHeader* header, size_t total_message_size);
+  
+  /// Initialize message header with integrity fields
+  void InitializeMessageHeader(MessageHeader* header, MessageType type, 
+                              uint32_t key_length, uint32_t value_length, 
+                              uint64_t request_id, const void* payload_data);
+  
+  /// Log message buffer in hex format for debugging
+  void LogMessageBuffer(const char* buffer, size_t size, const std::string& prefix);
+}
 
 }  // namespace tensorstore
 

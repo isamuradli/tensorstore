@@ -60,25 +60,25 @@ int main(int argc, char* argv[]) {
   
   std::cout << "Connected to Node 2 successfully!" << std::endl;
   
-  // Write tensor data to remote DRAM as key-value pairs
-  std::cout << "Writing 4x4 tensor to Node 2's DRAM..." << std::endl;
+  // // Write tensor data to remote DRAM as key-value pairs
+  // std::cout << "Writing 4x4 tensor to Node 2's DRAM..." << std::endl;
   
-  // Convert tensor to string representation for storage
-  std::string tensor_data = "4x4_tensor:";
-  for (int i = 0; i < 4; ++i) {
-    for (int j = 0; j < 4; ++j) {
-      tensor_data += std::to_string(tensor(i, j));
-      if (i < 3 || j < 3) tensor_data += ",";
-    }
-  }
+  // // Convert tensor to string representation for storage
+  // std::string tensor_data = "4x4_tensor:";
+  // for (int i = 0; i < 4; ++i) {
+  //   for (int j = 0; j < 4; ++j) {
+  //     tensor_data += std::to_string(tensor(i, j));
+  //     if (i < 3 || j < 3) tensor_data += ",";
+  //   }
+  // }
   
-  auto write_result = tensorstore::kvstore::Write(*kvstore, "tensor_4x4", absl::Cord(tensor_data)).result();
-  if (!write_result.ok()) {
-    std::cerr << "Failed to write tensor: " << write_result.status() << std::endl;
-    return 1;
-  }
+  // auto write_result = tensorstore::kvstore::Write(*kvstore, "tensor_4x4", absl::Cord(tensor_data)).result();
+  // if (!write_result.ok()) {
+  //   std::cerr << "Failed to write tensor: " << write_result.status() << std::endl;
+  //   return 1;
+  // }
   
-  std::cout << "✓ Successfully transferred 4x4 tensor to Node 2's DRAM!" << std::endl;
+  // std::cout << "✓ Successfully transferred 4x4 tensor to Node 2's DRAM!" << std::endl;
   
   // Test additional kvstore operations
   std::cout << "Testing additional kvstore write..." << std::endl;
