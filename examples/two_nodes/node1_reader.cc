@@ -57,7 +57,7 @@ int main(int argc, char* argv[]) {
   std::cout << "\nReading tensor data from Node 2's DRAM..." << std::endl;
   
   // Read the 4x4 tensor data
-  auto tensor_read = tensorstore::kvstore::Read(*kvstore, "tensor_4x4").result();
+  auto tensor_read = tensorstore::kvstore::Read(*kvstore, "testkey").result();
   if (!tensor_read.ok()) {
     std::cerr << "Failed to read tensor data: " << tensor_read.status() << std::endl;
     return 1;
@@ -73,8 +73,8 @@ int main(int argc, char* argv[]) {
   std::cout << "  Raw data: " << tensor_data << std::endl;
   
   // Parse and display the tensor data
-  if (tensor_data.find("4x4_tensor:") == 0) {
-    std::string values_str = tensor_data.substr(11); // Skip "4x4_tensor:"
+  if (tensor_data.find("Data from Node 1") == 0) {
+    std::string values_str = tensor_data.substr(16); // Skip "Data from Node 1"
     std::cout << "\nParsed 4x4 tensor values:" << std::endl;
     
     // Parse comma-separated values
@@ -104,7 +104,7 @@ int main(int argc, char* argv[]) {
   // Read the simple key-value pair
   std::cout << "\nReading key-value pair from Node 2's DRAM..." << std::endl;
   
-  auto kv_read = tensorstore::kvstore::Read(*kvstore, "node1_test").result();
+  auto kv_read = tensorstore::kvstore::Read(*kvstore, "testkey").result();
   if (!kv_read.ok()) {
     std::cerr << "Failed to read key-value data: " << kv_read.status() << std::endl;
     return 1;
@@ -117,12 +117,12 @@ int main(int argc, char* argv[]) {
   
   std::string kv_data = std::string(kv_read->value);
   std::cout << "✓ Successfully read key-value pair from Node 2!" << std::endl;
-  std::cout << "  Key: 'node1_test'" << std::endl;
+  std::cout << "  Key: 'testkey'" << std::endl;
   std::cout << "  Value: '" << kv_data << "'" << std::endl;
   
   // Verify the data matches what the writer sent
   std::cout << "\n=== Data Verification ===" << std::endl;
-  bool tensor_valid = tensor_data.find("4x4_tensor:") == 0;
+  bool tensor_valid = tensor_data == "Data from Node 1";
   bool kv_valid = kv_data == "Data from Node 1";
   
   std::cout << "Tensor data valid: " << (tensor_valid ? "YES" : "NO") << std::endl;

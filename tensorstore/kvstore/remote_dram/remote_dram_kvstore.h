@@ -287,6 +287,9 @@ class UcxManager {
 /// Send a notification to the server process that new data has been written
 void NotifyServerOfNewData(const kvstore::Key& key, const absl::Cord& value);
 
+/// Client-side callback for handling write responses
+void ClientWriteResponseCallback(void* request, ucs_status_t status, const ucp_tag_recv_info_t* info, void* user_data);
+
 /// Utility functions for message integrity
 namespace message_utils {
   /// Calculate simple checksum for data integrity

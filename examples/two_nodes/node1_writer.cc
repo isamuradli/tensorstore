@@ -84,7 +84,7 @@ int main(int argc, char* argv[]) {
   std::cout << "Testing additional kvstore write..." << std::endl;
   
   // Write a simple key-value pair
-  std::string test_key = "node1_test";
+  std::string test_key = "testkey";
   absl::Cord test_value("Data from Node 1");
   
   auto kv_write = tensorstore::kvstore::Write(*kvstore, test_key, test_value).result();
