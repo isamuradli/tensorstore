@@ -289,6 +289,7 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       // Send write response back to client
       // Schedule response sending to avoid deadlock in callback
       uint64_t request_id = header->request_id;
+      std::cout << "\n\n"<<request_id << "\n\n"<<std::endl;
       std::string key_copy = key;
       std::thread([request_id, key_copy]() {
         auto& ucx_manager = UcxManager::Instance();
@@ -390,7 +391,7 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
                << static_cast<unsigned char>(response_data[i]) << " ";
       if ((i + 1) % 16 == 0) hex_dump << "\n";
     }
-    ABSL_LOG(INFO) << "Hex dump of received data:\n" << hex_dump.str();
+    // ABSL_LOG(INFO) << "Hex dump of received data:\n" << hex_dump.str();
     
     ReadResponse* response = reinterpret_cast<ReadResponse*>(response_data.data());
     
@@ -674,7 +675,7 @@ void LogMessageBuffer(const char* buffer, size_t size, const std::string& prefix
       readable_payload += "...";
     }
     
-    ABSL_LOG(INFO) << "  Payload: " << readable_payload;
+    // ABSL_LOG(INFO) << "  Payload: " << readable_payload;
   }
 }
 
@@ -1189,7 +1190,7 @@ void UcxManager::SendReadResponse(ucp_ep_h client_endpoint, uint64_t request_id,
                << static_cast<unsigned char>(send_buffer[i]) << " ";
       if ((i + 1) % 16 == 0) hex_dump << "\n";
     }
-    ABSL_LOG(INFO) << "Server hex dump of complete send buffer:\n" << hex_dump.str();
+    // ABSL_LOG(INFO) << "Server hex dump of complete send buffer:\n" << hex_dump.str();
     
     // Send complete message using UCX
     ucp_request_param_t send_params;
@@ -1579,10 +1580,10 @@ class RemoteDramDriver
       delete[] stable_buffer;
       delete user_data;
     } else if (request == nullptr) {
-      // Send completed immediately
+      // Send completed immediately, but still wait for server response
       ABSL_LOG(INFO) << "UCX write request sent immediately for request_id=" << request_id;
-      ucx_manager.CompletePendingOperation(request_id, absl::OkStatus());
-      // Clean up resources
+      // DON'T complete here - wait for server response in ClientWriteResponseCallback
+      // Clean up send resources only
       delete[] stable_buffer;
       delete user_data;
     } else {
