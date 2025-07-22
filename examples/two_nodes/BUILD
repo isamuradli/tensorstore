@@ -91,6 +91,23 @@ tensorstore_cc_binary(
 )
 
 tensorstore_cc_binary(
+    name = "zarr_writer_client",
+    srcs = ["zarr_writer_client.cc"],
+    deps = [
+        "//tensorstore",
+        "//tensorstore:all_drivers",
+        "//tensorstore:array",
+        "//tensorstore:data_type",
+        "//tensorstore:open",
+        "//tensorstore:spec",
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+    ],
+)
+
+tensorstore_cc_binary(
     name = "zarr_tensor_client",
     srcs = ["zarr_tensor_client.cc"],
     deps = [

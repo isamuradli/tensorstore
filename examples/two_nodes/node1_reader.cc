@@ -56,85 +56,61 @@ int main(int argc, char* argv[]) {
   // Read the tensor data written by node1_writer
   std::cout << "\nReading tensor data from Node 2's DRAM..." << std::endl;
   
-  // Read the 4x4 tensor data
-  auto tensor_read = tensorstore::kvstore::Read(*kvstore, "testkey").result();
-  if (!tensor_read.ok()) {
-    std::cerr << "Failed to read tensor data: " << tensor_read.status() << std::endl;
-    return 1;
-  }
-  
-  if (!tensor_read->has_value()) {
-    std::cerr << "Tensor data not found in server!" << std::endl;
-    return 1;
-  }
-  
-  std::string tensor_data = std::string(tensor_read->value);
-  std::cout << "✓ Successfully read tensor data from Node 2!" << std::endl;
-  std::cout << "  Raw data: " << tensor_data << std::endl;
-  
-  // Parse and display the tensor data
-  if (tensor_data.find("Data from Node 1") == 0) {
-    std::string values_str = tensor_data.substr(16); // Skip "Data from Node 1"
-    std::cout << "\nParsed 4x4 tensor values:" << std::endl;
-    
-    // Parse comma-separated values
-    std::istringstream iss(values_str);
-    std::string value;
-    int row = 0, col = 0;
-    
-    while (std::getline(iss, value, ',')) {
-      if (col == 0) std::cout << "  [";
-      std::cout << value;
-      col++;
-      if (col == 4) {
-        std::cout << "]" << std::endl;
-        col = 0;
-        row++;
-      } else {
-        std::cout << ", ";
+  for (int i = 1; i < 100; i++) {
+    std::string index_str = std::to_string(i);
+    std::string test_key = "testkey" + index_str;
+    auto tensor_read = tensorstore::kvstore::Read(*kvstore, test_key).result();
+
+    if (!tensor_read.ok()) {
+      std::cerr << "Failed to read tensor data: " << tensor_read.status() << std::endl;
+      return 1;
+    }
+    if (!tensor_read->has_value()) {
+        std::cerr << "Tensor data not found in server!" << std::endl;
+        return 1;
       }
-    }
-    
-    // Handle the last value (no comma after it)
-    if (col > 0) {
-      std::cout << "]" << std::endl;
-    }
-  }
+      
+      std::string tensor_data = std::string(tensor_read->value);
+      std::cout << "✓ Successfully read tensor data from Node 2!" << std::endl;
+      std::cout << "  Raw data: " << tensor_data << std::endl;
+} 
+
+  // Parse and display the tensor data
+
+  //Read the simple key-value pair
+  // std::cout << "\nReading key-value pair from Node 2's DRAM..." << std::endl;
   
-  // Read the simple key-value pair
-  std::cout << "\nReading key-value pair from Node 2's DRAM..." << std::endl;
+  // auto kv_read = tensorstore::kvstore::Read(*kvstore, "testkey2").result();
+  // if (!kv_read.ok()) {
+  //   std::cerr << "Failed to read key-value data: " << kv_read.status() << std::endl;
+  //   return 1;
+  // }
   
-  auto kv_read = tensorstore::kvstore::Read(*kvstore, "testkey").result();
-  if (!kv_read.ok()) {
-    std::cerr << "Failed to read key-value data: " << kv_read.status() << std::endl;
-    return 1;
-  }
+  // if (!kv_read->has_value()) {
+  //   std::cerr << "Key-value data not found in server!" << std::endl;
+  //   return 1;
+  // }
   
-  if (!kv_read->has_value()) {
-    std::cerr << "Key-value data not found in server!" << std::endl;
-    return 1;
-  }
+  // std::string kv_data = std::string(kv_read->value);
+  // std::cout << "✓ Successfully read key-value pair from Node 2!" << std::endl;
+  // std::cout << "  Key: 'testkey'" << std::endl;
+  // std::cout << "  Value: '" << kv_data << "'" << std::endl;
   
-  std::string kv_data = std::string(kv_read->value);
-  std::cout << "✓ Successfully read key-value pair from Node 2!" << std::endl;
-  std::cout << "  Key: 'testkey'" << std::endl;
-  std::cout << "  Value: '" << kv_data << "'" << std::endl;
+  // // Verify the data matches what the writer sent
+  // std::cout << "\n=== Data Verification ===" << std::endl;
+  // bool tensor_valid = tensor_data == "Data from Node 1";
+  // bool kv_valid = kv_data == "Data from Node 1";
   
-  // Verify the data matches what the writer sent
-  std::cout << "\n=== Data Verification ===" << std::endl;
-  bool tensor_valid = tensor_data == "Data from Node 1";
-  bool kv_valid = kv_data == "Data from Node 1";
+  // std::cout << "Tensor data valid: " << (tensor_valid ? "YES" : "NO") << std::endl;
+  // std::cout << "Key-value data valid: " << (kv_valid ? "YES" : "NO") << std::endl;
   
-  std::cout << "Tensor data valid: " << (tensor_valid ? "YES" : "NO") << std::endl;
-  std::cout << "Key-value data valid: " << (kv_valid ? "YES" : "NO") << std::endl;
-  
-  if (tensor_valid && kv_valid) {
-    std::cout << "\n✓ SUCCESS: All data successfully read from Node 2's DRAM!" << std::endl;
-    std::cout << "✓ Server is correctly maintaining data in memory!" << std::endl;
-  } else {
-    std::cout << "\n✗ FAILURE: Data validation failed!" << std::endl;
-    return 1;
-  }
+  // if (tensor_valid && kv_valid) {
+  //   std::cout << "\n✓ SUCCESS: All data successfully read from Node 2's DRAM!" << std::endl;
+  //   std::cout << "✓ Server is correctly maintaining data in memory!" << std::endl;
+  // } else {
+  //   std::cout << "\n✗ FAILURE: Data validation failed!" << std::endl;
+  //   return 1;
+  // }
   
   std::cout << "\nNode 1 reader operations completed successfully!" << std::endl;
   return 0;

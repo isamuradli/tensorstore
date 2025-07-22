@@ -84,19 +84,27 @@ int main(int argc, char* argv[]) {
   std::cout << "Testing additional kvstore write..." << std::endl;
   
   // Write a simple key-value pair
-  std::string test_key = "testkey";
-  absl::Cord test_value("Data from Node 1");
-  
-  auto kv_write = tensorstore::kvstore::Write(*kvstore, test_key, test_value).result();
-  if (!kv_write.ok()) {
-    std::cerr << "Failed to write key-value: " << kv_write.status() << std::endl;
-    return 1;
-  }
-  
-  std::cout << "✓ Successfully wrote key-value pair to Node 2!" << std::endl;
-  std::cout << "  Key: '" << test_key << "'" << std::endl;
-  std::cout << "  Value: '" << std::string(test_value) << "'" << std::endl;
+
+  for (int i = 1; i < 100; i++) {
+    std::string index_str = std::to_string(i);
+    std::string test_key = "testkey" + index_str;
+    std::string value = "Data from Node" + index_str;
+    absl::Cord test_value(value);
+
+    auto kv_write = tensorstore::kvstore::Write(*kvstore, test_key, test_value).result();
+      if (!kv_write.ok()) {
+        std::cerr << "Failed to write key-value: " << kv_write.status() << std::endl;
+        return 1;
+
+
+    std::cout << "✓ Successfully wrote key-value pair to Node 2!" << std::endl;
+    std::cout << "  Key: '" << test_key << "'" << std::endl;
+    std::cout << "  Value: '" << std::string(test_value) << "'" << std::endl;
+    std::cout << "\n######################################################\n"<<std::endl;
+} }
+
   
   std::cout << "\nNode 1 operations completed successfully!" << std::endl;
+
   return 0;
 } 
