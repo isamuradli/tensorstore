@@ -33,6 +33,7 @@ filegroup(
 DRIVERS = DRIVER_DOCS + [
     "gcs_grpc",
     "gcs_http",
+    "remote_dram",
 ]
 
 EXTRA_DRIVER_TARGETS = []

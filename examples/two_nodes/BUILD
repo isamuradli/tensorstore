@@ -145,10 +145,9 @@ tensorstore_cc_binary(
 )
 
 tensorstore_cc_binary(
-    name = "optimized_tensor_client",
-    srcs = ["optimized_tensor_client.cc"],
+    name = "zarr_with_single_spec",
+    srcs = ["zarr_with_single_spec.cc"],
     deps = [
-        ":tensor_transfer_extensions",
         "//tensorstore",
         "//tensorstore:all_drivers",
         "//tensorstore:array",
@@ -160,6 +159,5 @@ tensorstore_cc_binary(
         "//tensorstore/kvstore/remote_dram",
         "//tensorstore/util:result",
         "//tensorstore/util:status",
-        "@abseil-cpp//absl/strings:cord",
     ],
 )

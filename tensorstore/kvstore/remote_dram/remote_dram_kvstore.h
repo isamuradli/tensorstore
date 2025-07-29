@@ -258,7 +258,11 @@ class UcxManager {
   ucp_context_h context_ ABSL_GUARDED_BY(mutex_) = nullptr;
   ucp_worker_h worker_ ABSL_GUARDED_BY(mutex_) = nullptr;
   ucp_listener_h listener_ ABSL_GUARDED_BY(mutex_) = nullptr;
-  bool progress_task_running_ ABSL_GUARDED_BY(mutex_) = false;
+  
+  // ENHANCED: Use atomic bool for thread-safe progress task state
+  std::atomic<bool> progress_task_running_{false};
+  // ENHANCED: Use managed thread for proper cleanup
+  std::unique_ptr<std::thread> progress_thread_ ABSL_GUARDED_BY(mutex_);
   
   /// Server-side storage
   RemoteDramStorage storage_;

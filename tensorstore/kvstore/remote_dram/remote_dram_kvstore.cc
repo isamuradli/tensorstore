@@ -25,6 +25,11 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <atomic>
+#include <memory>
+#include <queue>
+#include <condition_variable>
+#include <functional>
 
 // System includes for socket operations
 #include <arpa/inet.h>
@@ -50,6 +55,10 @@
 #include "tensorstore/util/result.h"
 #include "tensorstore/util/status.h"
 #include "tensorstore/util/str_cat.h"
+#include "tensorstore/util/executor.h"
+#include "tensorstore/internal/intrusive_ptr.h"
+#include "absl/time/time.h"
+#include "absl/time/clock.h"
 
 // specializations for std::optional
 #include "tensorstore/internal/cache_key/std_optional.h"  // IWYU pragma: keep
@@ -62,11 +71,260 @@
 
 namespace tensorstore {
 
+// Enhanced callback dispatcher to safely schedule work from UCX callbacks
+// This replaces the dangerous detached thread pattern
+class UcxCallbackDispatcher {
+ private:
+  static std::queue<std::function<void()>> callback_queue_;
+  static std::mutex queue_mutex_;
+  static std::condition_variable queue_cv_;
+  static std::atomic<bool> worker_running_;
+  static std::thread worker_thread_;
+  
+  static void WorkerLoop() {
+    while (worker_running_.load() || !callback_queue_.empty()) {
+      std::unique_lock<std::mutex> lock(queue_mutex_);
+      queue_cv_.wait(lock, [] { 
+        return !callback_queue_.empty() || !worker_running_.load(); 
+      });
+      
+      if (!callback_queue_.empty()) {
+        auto callback = std::move(callback_queue_.front());
+        callback_queue_.pop();
+        lock.unlock();
+        
+        // Execute callback outside of mutex to avoid deadlock
+        callback();
+      }
+    }
+  }
+  
+ public:
+  static void Initialize() {
+    if (!worker_running_.exchange(true)) {
+      worker_thread_ = std::thread(WorkerLoop);
+    }
+  }
+  
+  static void Shutdown() {
+    worker_running_.store(false);
+    queue_cv_.notify_all();
+    if (worker_thread_.joinable()) {
+      worker_thread_.join();
+    }
+  }
+  
+  template<typename Fn>
+  static void ScheduleCallback(Fn&& fn) {
+    // Initialize worker if not already running
+    Initialize();
+    
+    {
+      std::lock_guard<std::mutex> lock(queue_mutex_);
+      callback_queue_.emplace(std::forward<Fn>(fn));
+    }
+    queue_cv_.notify_one();
+  }
+};
+
+// Static member definitions for UcxCallbackDispatcher
+std::queue<std::function<void()>> UcxCallbackDispatcher::callback_queue_;
+std::mutex UcxCallbackDispatcher::queue_mutex_;
+std::condition_variable UcxCallbackDispatcher::queue_cv_;
+std::atomic<bool> UcxCallbackDispatcher::worker_running_{false};
+std::thread UcxCallbackDispatcher::worker_thread_;
+
+// Enhanced retry mechanism for UCX operations
+class UcxRetryManager {
+ public:
+  static constexpr int kMaxRetries = 3;
+  static constexpr absl::Duration kBaseDelay = absl::Milliseconds(100);
+  static constexpr absl::Duration kMaxDelay = absl::Seconds(5);
+  
+  static bool IsRetriableError(ucs_status_t status) {
+    return status == UCS_ERR_NO_MEMORY || 
+           status == UCS_ERR_BUSY ||
+           status == UCS_ERR_NO_RESOURCE;
+  }
+  
+  static absl::Duration CalculateBackoffDelay(int attempt) {
+    if (attempt >= kMaxRetries) {
+      return absl::ZeroDuration();
+    }
+    // Exponential backoff with jitter
+    auto delay = kBaseDelay * (1 << attempt);
+    if (delay > kMaxDelay) {
+      delay = kMaxDelay;
+    }
+    return delay;
+  }
+};
+
+// Enhanced operation tracking for better error handling
+struct UcxOperationTracker {
+  uint64_t request_id;
+  int attempt_count = 0;
+  absl::Time start_time;
+  absl::Time last_attempt_time;
+  
+  UcxOperationTracker(uint64_t id) 
+    : request_id(id), start_time(absl::Now()), last_attempt_time(absl::Now()) {}
+  
+  bool ShouldRetry(ucs_status_t status) const {
+    return attempt_count < UcxRetryManager::kMaxRetries && 
+           UcxRetryManager::IsRetriableError(status);
+  }
+  
+  absl::Duration GetNextRetryDelay() const {
+    return UcxRetryManager::CalculateBackoffDelay(attempt_count);
+  }
+  
+  void RecordAttempt() {
+    attempt_count++;
+    last_attempt_time = absl::Now();
+  }
+};
+
+// Enhanced UCX Buffer wrapper with proper RAII for memory safety
+class UcxBuffer {
+ public:
+  static std::unique_ptr<UcxBuffer> Create(size_t size) {
+    return std::make_unique<UcxBuffer>(size);
+  }
+  
+  explicit UcxBuffer(size_t size) : size_(size), data_(new char[size]) {}
+  ~UcxBuffer() { delete[] data_; }
+  
+  // Non-copyable, movable
+  UcxBuffer(const UcxBuffer&) = delete;
+  UcxBuffer& operator=(const UcxBuffer&) = delete;
+  UcxBuffer(UcxBuffer&&) = default;
+  UcxBuffer& operator=(UcxBuffer&&) = default;
+  
+  char* data() { return data_; }
+  const char* data() const { return data_; }
+  size_t size() const { return size_; }
+  
+ private:
+  size_t size_;
+  char* data_;
+};
+
+// Server-side task for handling read responses safely with reference counting
+struct ServerReadResponseTask : public internal::AtomicReferenceCount<ServerReadResponseTask> {
+  ucp_ep_h client_endpoint;
+  uint64_t request_id;
+  std::optional<absl::Cord> value;
+  std::unique_ptr<UcxBuffer> send_buffer;
+  
+  ServerReadResponseTask(ucp_ep_h ep, uint64_t id, std::optional<absl::Cord> val)
+    : client_endpoint(ep), request_id(id), value(std::move(val)) {}
+  
+  void Start() {
+    // Create response message
+    uint32_t status_code = value.has_value() ? 0 : 1;
+    uint32_t value_size = value.has_value() ? value->size() : 0;
+    size_t total_size = sizeof(ReadResponse) + value_size;
+    
+    send_buffer = UcxBuffer::Create(total_size);
+    
+    ReadResponse* response = reinterpret_cast<ReadResponse*>(send_buffer->data());
+    response->header.magic_number = MESSAGE_MAGIC_NUMBER;
+    response->header.type = MessageType::READ_RESPONSE;
+    response->header.key_length = 0;
+    response->header.value_length = value_size;
+    response->header.request_id = request_id;
+    response->status_code = status_code;
+    
+    if (value.has_value() && value_size > 0) {
+      std::string value_str = std::string(*value);
+      response->header.checksum = message_utils::CalculateChecksum(
+          value_str.data(), value_size);
+      std::memcpy(send_buffer->data() + sizeof(ReadResponse), 
+                  value_str.data(), value_size);
+    } else {
+      response->header.checksum = 0;
+    }
+    
+    // Send response with proper reference counting
+    ucp_request_param_t send_params;
+    send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
+    send_params.cb.send = ServerSendCallback;
+    send_params.user_data = this;
+    intrusive_ptr_increment(this);  // For callback
+    
+    void* request = ucp_tag_send_nbx(client_endpoint, send_buffer->data(),
+                                     total_size, UCX_TAG_READ_RESPONSE, &send_params);
+    
+    if (UCS_PTR_IS_ERR(request)) {
+      ABSL_LOG(ERROR) << "Failed to send read response: " 
+                      << ucs_status_string(UCS_PTR_STATUS(request));
+      intrusive_ptr_decrement(this);  // Cleanup
+    }
+  }
+  
+  static void ServerSendCallback(void* request, ucs_status_t status, void* user_data) {
+    auto* task = static_cast<ServerReadResponseTask*>(user_data);
+    ABSL_LOG(INFO) << "Server read response sent: " << ucs_status_string(status);
+    
+    intrusive_ptr_decrement(task);  // Release reference
+    ucp_request_free(request);
+  }
+};
+
+// Server-side task for handling write responses safely with reference counting
+struct ServerWriteResponseTask : public internal::AtomicReferenceCount<ServerWriteResponseTask> {
+  ucp_ep_h client_endpoint;
+  uint64_t request_id;
+  uint32_t status_code;
+  std::unique_ptr<UcxBuffer> send_buffer;
+  
+  ServerWriteResponseTask(ucp_ep_h ep, uint64_t id, uint32_t status)
+    : client_endpoint(ep), request_id(id), status_code(status) {}
+  
+  void Start() {
+    send_buffer = UcxBuffer::Create(sizeof(WriteResponse));
+    
+    WriteResponse* response = reinterpret_cast<WriteResponse*>(send_buffer->data());
+    response->header.magic_number = MESSAGE_MAGIC_NUMBER;
+    response->header.type = MessageType::WRITE_RESPONSE;
+    response->header.key_length = 0;
+    response->header.value_length = 0;
+    response->header.request_id = request_id;
+    response->header.checksum = 0;
+    response->status_code = status_code;
+    
+    // Send response with proper reference counting
+    ucp_request_param_t send_params;
+    send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
+    send_params.cb.send = ServerSendCallback;
+    send_params.user_data = this;
+    intrusive_ptr_increment(this);  // For callback
+    
+    void* request = ucp_tag_send_nbx(client_endpoint, send_buffer->data(),
+                                     sizeof(WriteResponse), UCX_TAG_WRITE_RESPONSE, &send_params);
+    
+    if (UCS_PTR_IS_ERR(request)) {
+      ABSL_LOG(ERROR) << "Failed to send write response: " 
+                      << ucs_status_string(UCS_PTR_STATUS(request));
+      intrusive_ptr_decrement(this);  // Cleanup
+    }
+  }
+  
+  static void ServerSendCallback(void* request, ucs_status_t status, void* user_data) {
+    auto* task = static_cast<ServerWriteResponseTask*>(user_data);
+    ABSL_LOG(INFO) << "Server write response sent: " << ucs_status_string(status);
+    
+    intrusive_ptr_decrement(task);  // Release reference
+    ucp_request_free(request);
+  }
+};
+
 // RemoteDramStorage Implementation
 void RemoteDramStorage::Store(const std::string& key, const absl::Cord& value) {
   absl::MutexLock lock(&mutex_);
   storage_[key] = value;
-  ABSL_LOG(INFO) << "Stored key '" << key << "' with " << value.size() << " bytes";
+  // ABSL_LOG(INFO) << "Stored key '" << key << "' with value: " << absl::StrCat(value) << " ";
 }
 
 std::optional<absl::Cord> RemoteDramStorage::Get(const std::string& key) const {
@@ -124,8 +382,8 @@ void SendCallback(void* request, ucs_status_t status, void* user_data) {
   uint64_t request_id = data->request_id;
   char* buffer_to_free = data->buffer_to_free;
   
-  ABSL_LOG(INFO) << "UCX send completed for request " << request_id 
-                 << " with status: " << ucs_status_string(status);
+  // ABSL_LOG(INFO) << "UCX send completed for request " << request_id 
+  //                << " with status: " << ucs_status_string(status);
   
   if (status == UCS_OK) {
     std::cout << "✅ UCX: Send completed successfully [ID:" << request_id << "]" << std::endl;
@@ -137,13 +395,13 @@ void SendCallback(void* request, ucs_status_t status, void* user_data) {
     absl::OkStatus() : 
     absl::InternalError(absl::StrFormat("UCX send failed: %s", ucs_status_string(status)));
   
-  // Schedule completion to avoid deadlock in callback
-  std::thread([request_id, result_status, buffer_to_free, data]() {
+  // ENHANCED: Use safer callback dispatcher instead of detached thread
+  UcxCallbackDispatcher::ScheduleCallback([request_id, result_status, buffer_to_free, data]() {
     UcxManager::Instance().CompletePendingOperation(request_id, result_status);
     // Free the buffer and user_data after completing the operation
     delete[] buffer_to_free;
     delete data;
-  }).detach();
+  });
   
   ucp_request_free(request);
 }
@@ -168,11 +426,11 @@ void UcxListenerCallback(ucp_conn_request_h conn_request, void* user_data) {
   
   ABSL_LOG(INFO) << "Server endpoint created successfully for incoming connection";
   
-  // Register this endpoint as a client endpoint for responses
-  // Schedule endpoint registration to avoid deadlock
-  std::thread([server_endpoint]() {
+  // ENHANCED: Register this endpoint as a client endpoint for responses
+  // Use safer callback dispatcher to avoid deadlock
+  UcxCallbackDispatcher::ScheduleCallback([server_endpoint]() {
     UcxManager::Instance().RegisterClientEndpoint(server_endpoint);
-  }).detach();
+  });
 }
 
 /// Receive completion callback for server-side message handling
@@ -216,7 +474,7 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       
       // Look for the key-value pattern: should be "node1_test" followed by "Data from Node 1"
       std::string payload_str(payload, payload_size);
-      ABSL_LOG(INFO) << "Raw payload content: '" << payload_str << "'";
+      // ABSL_LOG(INFO) << "Raw payload content: '" << payload_str << "'";
       
       // Try to find readable strings in the payload
       std::string readable_payload;
@@ -230,7 +488,7 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
           readable_payload += " [" + std::to_string(static_cast<unsigned char>(c)) + "] ";
         }
       }
-      ABSL_LOG(INFO) << "Readable payload: " << readable_payload;
+      // ABSL_LOG(INFO) << "Readable payload: " << readable_payload;
       
       // Try to find the expected key and value strings in the buffer
       std::string expected_key = "node1_test";
@@ -283,15 +541,13 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       ABSL_LOG(INFO) << "Server stored key-value pair: key='" << key 
                      << "', value_size=" << value.size();
       
-      std::cout << "📥 SERVER: Received write request [ID:" << header->request_id << "] key='" << key 
-                << "' value='" << std::string(value) << "' - STORED SUCCESS" << std::endl;
+      // std::cout << "📥 SERVER: Received write request [ID:" << header->request_id << "] key='" << key 
+      //           << "' value='" << std::string(value) << "' - STORED SUCCESS" << std::endl;
       
-      // Send write response back to client
-      // Schedule response sending to avoid deadlock in callback
+      // ENHANCED: Send write response back to client using safe callback dispatcher
       uint64_t request_id = header->request_id;
-      std::cout << "\n\n"<<request_id << "\n\n"<<std::endl;
       std::string key_copy = key;
-      std::thread([request_id, key_copy]() {
+      UcxCallbackDispatcher::ScheduleCallback([request_id, key_copy]() {
         auto& ucx_manager = UcxManager::Instance();
         ucp_ep_h client_endpoint = ucx_manager.GetClientEndpoint();
         if (client_endpoint) {
@@ -300,7 +556,7 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
         } else {
           ABSL_LOG(ERROR) << "No client endpoint available to send write response for key: " << key_copy;
         }
-      }).detach();
+      });
       
     } else if (header->type == MessageType::READ_REQUEST) {
       // Handle read request
@@ -309,7 +565,7 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       
       ABSL_LOG(INFO) << "Server received read request for key='" << key << "'";
       
-      std::cout << "📬 SERVER: Received read request [ID:" << header->request_id << "] key='" << key << "'" << std::endl;
+      // std::cout << "📬 SERVER: Received read request [ID:" << header->request_id << "] key='" << key << "'" << std::endl;
       
       // Look up the key in storage
       auto& storage = UcxManager::Instance().GetStorage();
@@ -323,11 +579,10 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
         std::cout << "❌ SERVER: Key '" << key << "' not found [ID:" << header->request_id << "]" << std::endl;
       }
       
-      // Send read response back to client
-      // Schedule response sending to avoid deadlock in callback
+      // ENHANCED: Send read response back to client using safe callback dispatcher
       uint64_t request_id = header->request_id;
       std::string key_copy = key;
-      std::thread([request_id, key_copy, value]() {
+      UcxCallbackDispatcher::ScheduleCallback([request_id, key_copy, value]() {
         auto& ucx_manager = UcxManager::Instance();
         ucp_ep_h client_endpoint = ucx_manager.GetClientEndpoint();
         if (client_endpoint) {
@@ -336,17 +591,17 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
         } else {
           ABSL_LOG(ERROR) << "No client endpoint available to send read response for key: " << key_copy;
         }
-      }).detach();
+      });
     }
     
     // Only post another receive buffer if we're not shutting down
     // Check if UCX manager is still active before posting new receive
     auto& ucx_manager = UcxManager::Instance();
     if (ucx_manager.GetContext() && ucx_manager.GetWorker()) {
-      // Schedule posting to avoid deadlock in callback
-      std::thread([&ucx_manager]() {
+      // ENHANCED: Use safer callback dispatcher to avoid deadlock
+      UcxCallbackDispatcher::ScheduleCallback([&ucx_manager]() {
         ucx_manager.PostServerReceive();
-      }).detach();
+      });
     }
   } else {
     ABSL_LOG(ERROR) << "Failed to receive message: " << ucs_status_string(status);
@@ -363,7 +618,7 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
 
 /// Client-side callback for handling read responses
 void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_recv_info_t* info, void* user_data) {
-  ABSL_LOG(INFO) << "UCX client receive completed with status: " << ucs_status_string(status);
+  // ABSL_LOG(INFO) << "UCX client receive completed with status: " << ucs_status_string(status);
   
   // Extract user data structure
   struct ReadUserData {
@@ -381,7 +636,7 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
     std::memcpy(response_data.data(), buffer, info->length);
     
     // Debug: Log the raw buffer content and hex dump
-    ABSL_LOG(INFO) << "Client received " << info->length << " bytes";
+    // ABSL_LOG(INFO) << "Client received " << info->length << " bytes";
     message_utils::LogMessageBuffer(response_data.data(), info->length, "Client received read response");
     
     // Add hex dump for debugging the exact buffer layout
@@ -419,7 +674,7 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
         result.value = absl::Cord(std::string(value_ptr, response->header.value_length));
         result.stamp.generation = StorageGeneration::FromString("remote_read");
         result.stamp.time = absl::Now();
-        ABSL_LOG(INFO) << "Read successful, value size=" << result.value.size();
+        // ABSL_LOG(INFO) << "Read successful, value size=" << result.value.size();
         std::cout << "📥 CLIENT: Read response [ID:" << response->header.request_id << "] SUCCESS - received " << result.value.size() << " bytes" << std::endl;
       }
     } else {
@@ -431,26 +686,24 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       std::cout << "❌ CLIENT: Read response [ID:" << response->header.request_id << "] KEY NOT FOUND" << std::endl;
     }
     
-    // Complete the pending read operation
-    // Schedule completion to avoid deadlock in callback
-    std::thread([request_id, result = std::move(result)]() mutable {
+    // ENHANCED: Complete the pending read operation using safe callback dispatcher
+    UcxCallbackDispatcher::ScheduleCallback([request_id, result = std::move(result)]() mutable {
       UcxManager::Instance().CompletePendingReadOperation(request_id, std::move(result));
-    }).detach();
+    });
     
     delete[] buffer;
     delete read_data;
   } else {
     ABSL_LOG(ERROR) << "Failed to receive read response: " << ucs_status_string(status);
     
-    // Complete with error
-    // Schedule completion to avoid deadlock in callback
-    std::thread([request_id]() {
+    // ENHANCED: Complete with error using safe callback dispatcher
+    UcxCallbackDispatcher::ScheduleCallback([request_id]() {
       kvstore::ReadResult error_result;
       error_result.state = kvstore::ReadResult::kMissing;
       error_result.stamp.generation = StorageGeneration::NoValue();
       error_result.stamp.time = absl::Now();
       UcxManager::Instance().CompletePendingReadOperation(request_id, std::move(error_result));
-    }).detach();
+    });
     
     delete[] buffer;
     delete read_data;
@@ -461,7 +714,7 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
 
 /// Client-side callback for handling write responses
 void ClientWriteResponseCallback(void* request, ucs_status_t status, const ucp_tag_recv_info_t* info, void* user_data) {
-  ABSL_LOG(INFO) << "UCX client write response received with status: " << ucs_status_string(status);
+  // ABSL_LOG(INFO) << "UCX client write response received with status: " << ucs_status_string(status);
   
   // Extract user data structure (same pattern as read)
   struct WriteUserData {
@@ -479,20 +732,20 @@ void ClientWriteResponseCallback(void* request, ucs_status_t status, const ucp_t
     std::memcpy(response_data.data(), buffer, info->length);
     
     // Debug: Log the raw buffer content
-    ABSL_LOG(INFO) << "Client received write response " << info->length << " bytes";
+    // ABSL_LOG(INFO) << "Client received write response " << info->length << " bytes";
     message_utils::LogMessageBuffer(response_data.data(), info->length, "Client received write response");
     
     WriteResponse* response = reinterpret_cast<WriteResponse*>(response_data.data());
     
-    ABSL_LOG(INFO) << "Client received write response: status_code=" << response->status_code
-                   << ", request_id=" << response->header.request_id;
+    // ABSL_LOG(INFO) << "Client received write response: status_code=" << response->status_code
+    //                << ", request_id=" << response->header.request_id;
     
     absl::Status result_status;
     if (response->status_code == 0) {
       // Success
       result_status = absl::OkStatus();
-      ABSL_LOG(INFO) << "Write successful for request_id=" << response->header.request_id;
-      std::cout << "📥 CLIENT: Write response [ID:" << response->header.request_id << "] SUCCESS" << std::endl;
+      // ABSL_LOG(INFO) << "Write successful for request_id=" << response->header.request_id;
+      // std::cout << "📥 CLIENT: Write response [ID:" << response->header.request_id << "] SUCCESS" << std::endl;
     } else {
       // Error
       result_status = absl::InternalError("Write failed on server");
@@ -500,24 +753,22 @@ void ClientWriteResponseCallback(void* request, ucs_status_t status, const ucp_t
       std::cout << "❌ CLIENT: Write response [ID:" << response->header.request_id << "] FAILED" << std::endl;
     }
     
-    // Complete the pending write operation
-    // Schedule completion to avoid deadlock in callback
-    std::thread([request_id, result_status]() {
+    // ENHANCED: Complete the pending write operation using safe callback dispatcher
+    UcxCallbackDispatcher::ScheduleCallback([request_id, result_status]() {
       UcxManager::Instance().CompletePendingOperation(request_id, result_status);
-    }).detach();
+    });
     
     delete[] buffer;
     delete write_data;
   } else {
     ABSL_LOG(ERROR) << "Failed to receive write response: " << ucs_status_string(status);
     
-    // Complete with error
-    // Schedule completion to avoid deadlock in callback
-    std::thread([request_id, status]() {
+    // ENHANCED: Complete with error using safe callback dispatcher
+    UcxCallbackDispatcher::ScheduleCallback([request_id, status]() {
       UcxManager::Instance().CompletePendingOperation(request_id, 
           absl::InternalError(absl::StrFormat("Failed to receive write response: %s", 
                                              ucs_status_string(status))));
-    }).detach();
+    });
     
     delete[] buffer;
     delete write_data;
@@ -641,17 +892,17 @@ void InitializeMessageHeader(MessageHeader* header, MessageType type,
 }
 
 void LogMessageBuffer(const char* buffer, size_t size, const std::string& prefix) {
-  ABSL_LOG(INFO) << prefix << " (" << size << " bytes)";
+  // ABSL_LOG(INFO) << prefix << " (" << size << " bytes)";
   
   // Log the message header interpretation if present
   if (size >= sizeof(MessageHeader)) {
     const MessageHeader* header = reinterpret_cast<const MessageHeader*>(buffer);
-    ABSL_LOG(INFO) << "  Header: magic=" << std::dec << header->magic_number
-                   << ", type=" << static_cast<uint32_t>(header->type)
-                   << ", key_len=" << header->key_length
-                   << ", value_len=" << header->value_length
-                   << ", request_id=" << header->request_id
-                   << ", checksum=" << header->checksum;
+    // ABSL_LOG(INFO) << "  Header: magic=" << std::dec << header->magic_number
+    //                << ", type=" << static_cast<uint32_t>(header->type)
+    //                << ", key_len=" << header->key_length
+    //                << ", value_len=" << header->value_length
+    //                << ", request_id=" << header->request_id
+    //                << ", checksum=" << header->checksum;
   }
   
   // Extract and display the readable payload content
@@ -688,11 +939,12 @@ UcxManager& UcxManager::Instance() {
 }
 
 absl::Status UcxManager::Initialize() {
-  absl::MutexLock lock(&mutex_);
-  
-  if (initialized_) {
-    return absl::OkStatus();
-  }
+  {
+    absl::MutexLock lock(&mutex_);
+    
+    if (initialized_) {
+      return absl::OkStatus();
+    }
   
   // Initialize UCX context
   ucp_params_t ucp_params;
@@ -747,10 +999,11 @@ absl::Status UcxManager::Initialize() {
                                                ucs_status_string(status)));
   }
   
-  initialized_ = true;
-  ABSL_LOG(INFO) << "UCX Manager initialized successfully with socket support";
+    initialized_ = true;
+    ABSL_LOG(INFO) << "UCX Manager initialized successfully with socket support";
+  }  // Release mutex here
   
-  // Start worker progress polling
+  // Start worker progress polling outside of mutex scope
   StartWorkerProgressTask();
   
   return absl::OkStatus();
@@ -855,8 +1108,8 @@ Result<ucp_listener_h> UcxManager::CreateListener(const std::string& listen_addr
   listener_ = listener;
   
   // Post initial receive buffers for incoming messages
-  constexpr int num_preposted_receives = 10;
-  ABSL_LOG(INFO) << "Posting " << num_preposted_receives << " initial receive buffers";
+  constexpr int num_preposted_receives = 2000;
+  // ABSL_LOG(INFO) << "Posting " << num_preposted_receives << " initial receive buffers";
   for (int i = 0; i < num_preposted_receives; ++i) {
     PostServerReceiveNoLock();
   }
@@ -1053,7 +1306,7 @@ void UcxManager::PostServerReceive() {
     delete[] recv_buffer;
   } else if (request != nullptr) {
     // Request is in progress, will complete asynchronously
-    ABSL_LOG(INFO) << "Posted server receive buffer";
+    // ABSL_LOG(INFO) << "Posted server receive buffer";
     
     // Track the request for cleanup
     absl::MutexLock lock(&mutex_);
@@ -1144,105 +1397,18 @@ void UcxManager::SendReadResponse(ucp_ep_h client_endpoint, uint64_t request_id,
     return;
   }
   
-  // Determine response status and value size
-  uint32_t status_code = value.has_value() ? 0 : 1;  // 0 = success, 1 = not found
-  uint32_t value_size = value.has_value() ? value->size() : 0;
-  
-  // Create response message structure
-  ReadResponse response;
-  response.header.magic_number = MESSAGE_MAGIC_NUMBER;
-  response.header.type = MessageType::READ_RESPONSE;
-  response.header.key_length = 0;  // No key in response
-  response.header.value_length = value_size;
-  response.header.request_id = request_id;
-  response.status_code = status_code;
-  
-  // Calculate checksum for value data if present
-  if (value.has_value() && value_size > 0) {
-    std::string value_str = std::string(*value);
-    response.header.checksum = message_utils::CalculateChecksum(value_str.data(), value_size);
-  } else {
-    response.header.checksum = 0;
-  }
+  // Use the safe ServerReadResponseTask with proper reference counting
+  auto task = internal::MakeIntrusivePtr<ServerReadResponseTask>(
+      client_endpoint, request_id, value);
   
   // Debug: Log what we're about to send
+  uint32_t value_size = value.has_value() ? value->size() : 0;
+  uint32_t status_code = value.has_value() ? 0 : 1;
   ABSL_LOG(INFO) << "Server sending read response: value_size=" << value_size 
                  << ", status_code=" << status_code;
-  message_utils::LogMessageBuffer(reinterpret_cast<const char*>(&response), sizeof(ReadResponse), "Server sending read response header");
   
-  if (value.has_value() && value_size > 0) {
-    // Send header and value as separate UCX operations in sequence
-    // First, allocate a contiguous buffer for the complete message
-    size_t total_size = sizeof(ReadResponse) + value_size;
-    std::unique_ptr<char[]> send_buffer(new char[total_size]);
-    
-    // Copy header
-    std::memcpy(send_buffer.get(), &response, sizeof(ReadResponse));
-    
-    // Copy value data
-    std::string value_str = std::string(*value);
-    std::memcpy(send_buffer.get() + sizeof(ReadResponse), value_str.data(), value_size);
-    
-    // Debug hex dump
-    std::stringstream hex_dump;
-    for (size_t i = 0; i < std::min(total_size, static_cast<size_t>(64)); ++i) {
-      hex_dump << std::hex << std::setfill('0') << std::setw(2) 
-               << static_cast<unsigned char>(send_buffer[i]) << " ";
-      if ((i + 1) % 16 == 0) hex_dump << "\n";
-    }
-    // ABSL_LOG(INFO) << "Server hex dump of complete send buffer:\n" << hex_dump.str();
-    
-    // Send complete message using UCX
-    ucp_request_param_t send_params;
-    send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-    send_params.cb.send = [](void* request, ucs_status_t status, void* user_data) {
-      ABSL_LOG(INFO) << "Server read response sent with status: " << ucs_status_string(status);
-      // Clean up the buffer
-      std::unique_ptr<char[]>* buffer_ptr = static_cast<std::unique_ptr<char[]>*>(user_data);
-      delete buffer_ptr;
-      ucp_request_free(request);
-    };
-    
-    // Transfer ownership of buffer to callback
-    auto* buffer_ptr = new std::unique_ptr<char[]>(std::move(send_buffer));
-    send_params.user_data = buffer_ptr;
-    
-    ucp_tag_t tag = UCX_TAG_READ_RESPONSE;
-    void* request = ucp_tag_send_nbx(client_endpoint, buffer_ptr->get(), 
-                                     total_size, tag, &send_params);
-    
-    if (UCS_PTR_IS_ERR(request)) {
-      ABSL_LOG(ERROR) << "Failed to send read response: " 
-                      << ucs_status_string(UCS_PTR_STATUS(request));
-      delete buffer_ptr;  // Clean up on error
-    } else if (request == nullptr) {
-      ABSL_LOG(INFO) << "Read response sent immediately";
-      delete buffer_ptr;  // Clean up for immediate send
-    } else {
-      ABSL_LOG(INFO) << "Read response send in progress";
-    }
-  } else {
-    // Send just the header for empty/not found responses
-    ucp_request_param_t send_params;
-    send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK;
-    send_params.cb.send = [](void* request, ucs_status_t status, void* user_data) {
-      ABSL_LOG(INFO) << "Server read response (header only) sent with status: " << ucs_status_string(status);
-      ucp_request_free(request);
-    };
-    
-    ucp_tag_t tag = UCX_TAG_READ_RESPONSE;
-    void* request = ucp_tag_send_nbx(client_endpoint, &response, 
-                                     sizeof(ReadResponse), tag, &send_params);
-    
-    if (UCS_PTR_IS_ERR(request)) {
-      ABSL_LOG(ERROR) << "Failed to send read response: " 
-                      << ucs_status_string(UCS_PTR_STATUS(request));
-    } else if (request == nullptr) {
-      ABSL_LOG(INFO) << "Read response sent immediately";
-    } else {
-      ABSL_LOG(INFO) << "Read response send in progress";
-    }
-  }
+  // Start the task - it will handle the entire send operation safely
+  task->Start();
 }
 
 void UcxManager::SendWriteResponse(ucp_ep_h client_endpoint, uint64_t request_id, 
@@ -1252,51 +1418,33 @@ void UcxManager::SendWriteResponse(ucp_ep_h client_endpoint, uint64_t request_id
     return;
   }
   
-  // Create response message
-  WriteResponse response;
-  response.header.type = MessageType::WRITE_RESPONSE;
-  response.header.key_length = 0;  // No key in response
-  response.header.value_length = 0;  // No value in response
-  response.header.request_id = request_id;
-  response.status_code = status_code;
+  // Use the safe ServerWriteResponseTask with proper reference counting
+  auto task = internal::MakeIntrusivePtr<ServerWriteResponseTask>(
+      client_endpoint, request_id, status_code);
   
-  // Send response using UCX
-  ucp_request_param_t send_params;
-  send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK;
-  send_params.cb.send = [](void* request, ucs_status_t status, void* user_data) {
-    ABSL_LOG(INFO) << "Server write response sent with status: " << ucs_status_string(status);
-    ucp_request_free(request);
-  };
+  ABSL_LOG(INFO) << "Server sending write response: status_code=" << status_code;
   
-  ucp_tag_t tag = UCX_TAG_WRITE_RESPONSE;  // Use distinct tag for write responses
-  
-  void* request = ucp_tag_send_nbx(client_endpoint, &response, sizeof(response), 
-                                   tag, &send_params);
-  
-  if (UCS_PTR_IS_ERR(request)) {
-    ABSL_LOG(ERROR) << "Failed to send write response: " 
-                    << ucs_status_string(UCS_PTR_STATUS(request));
-  } else if (request == nullptr) {
-    ABSL_LOG(INFO) << "Write response sent immediately";
-  } else {
-    ABSL_LOG(INFO) << "Write response send in progress";
-  }
+  // Start the task - it will handle the entire send operation safely
+  task->Start();
 }
 
 void UcxManager::StartWorkerProgressTask() {
-  if (progress_task_running_) {
+  if (progress_task_running_.load()) {
     return;
   }
   
-  progress_task_running_ = true;
+  progress_task_running_.store(true);
   
-  // Start a background thread for worker progress polling
-  // In a real implementation, this should use TensorStore's thread pool
-  std::thread([this]() {
-    WorkerProgressTask();
-  }).detach();
+  // ENHANCED: Use a joinable thread with proper lifetime management
+  // This is safer than detached threads and allows for proper cleanup
+  {
+    absl::MutexLock lock(&mutex_);
+    progress_thread_ = std::make_unique<std::thread>([this]() {
+      WorkerProgressTask();
+    });
+  }
   
-  ABSL_LOG(INFO) << "UCX worker progress task started";
+  ABSL_LOG(INFO) << "UCX worker progress task started with enhanced thread management";
 }
 
 void UcxManager::WorkerProgressTask() {
@@ -1329,8 +1477,22 @@ void UcxManager::Shutdown() {
   
   ABSL_LOG(INFO) << "Starting UCX Manager shutdown";
   
-  // Stop the progress task first
-  progress_task_running_ = false;
+  // ENHANCED: Stop the progress task and properly join the thread
+  progress_task_running_.store(false);
+  
+  // ENHANCED: Shutdown the callback dispatcher to prevent deadlocks
+  UcxCallbackDispatcher::Shutdown();
+  
+  // Join the progress thread if it exists
+  if (progress_thread_ && progress_thread_->joinable()) {
+    ABSL_LOG(INFO) << "Waiting for progress thread to complete...";
+    // Release mutex before joining to avoid deadlock
+    mutex_.Unlock();
+    progress_thread_->join();
+    mutex_.Lock();
+    progress_thread_.reset();
+    ABSL_LOG(INFO) << "Progress thread joined successfully";
+  }
   
   // Cancel all pending receive operations
   CancelPendingReceivesNoLock();
@@ -1496,7 +1658,7 @@ class RemoteDramDriver
     auto& ucx_manager = UcxManager::Instance();
     uint64_t request_id = ucx_manager.GenerateRequestId();
     
-    ABSL_LOG(INFO) << "WriteRemote sending data for key '" << key << "' with " << value.size() << " bytes to server";
+    // ABSL_LOG(INFO) << "WriteRemote sending data for key '" << key << "' with " << value.size() << " bytes to server";
     
     // Create write message
     size_t message_size = sizeof(MessageHeader) + key.size() + value.size();
@@ -1518,18 +1680,18 @@ class RemoteDramDriver
                                           request_id, data_ptr);
     
     // Verify header was initialized correctly
-    ABSL_LOG(INFO) << "Client initialized header: magic=" << std::dec << header->magic_number
-                   << ", type=" << static_cast<uint32_t>(header->type)
-                   << ", key_len=" << header->key_length
-                   << ", value_len=" << header->value_length
-                   << ", request_id=" << header->request_id
-                   << ", checksum=" << header->checksum;
+    // ABSL_LOG(INFO) << "Client initialized header: magic=" << std::dec << header->magic_number
+    //                << ", type=" << static_cast<uint32_t>(header->type)
+    //                << ", key_len=" << header->key_length
+    //                << ", value_len=" << header->value_length
+    //                << ", request_id=" << header->request_id
+    //                << ", checksum=" << header->checksum;
     
     // Log message for debugging
     message_utils::LogMessageBuffer(message_buffer.data(), message_size, "Client sending write request");
     
-    ABSL_LOG(INFO) << "Sending UCX write request: key='" << key << "', value='" << value_str << "', request_id=" << request_id;
-    std::cout << "📤 CLIENT: Sending write request [ID:" << request_id << "] key='" << key << "' value='" << value_str << "'" << std::endl;
+    // ABSL_LOG(INFO) << "Sending UCX write request: key='" << key << "', value='" << value_str << "', request_id=" << request_id;
+    std::cout << "📤 CLIENT: Sending write request [ID:" << request_id << "]" << std::endl;
     
     // Create promise/future pair
     auto [promise, future] = PromiseFuturePair<void>::Make();
@@ -1553,8 +1715,8 @@ class RemoteDramDriver
     char* stable_buffer = new char[message_size];
     std::memcpy(stable_buffer, message_buffer.data(), message_size);
     
-    ABSL_LOG(INFO) << "About to send: buffer_ptr=" << static_cast<void*>(stable_buffer)
-                   << ", size=" << message_size << ", tag=" << std::dec << tag;
+    // ABSL_LOG(INFO) << "About to send: buffer_ptr=" << static_cast<void*>(stable_buffer)
+                  //  << ", size=" << message_size << ", tag=" << std::dec << tag;
     
     // Double-check the buffer contents before sending
     message_utils::LogMessageBuffer(stable_buffer, message_size, "Final buffer before UCX send");
@@ -1650,7 +1812,7 @@ class RemoteDramDriver
     auto& ucx_manager = UcxManager::Instance();
     uint64_t request_id = ucx_manager.GenerateRequestId();
     
-    ABSL_LOG(INFO) << "ReadRemote sending read request for key '" << key << "' to server";
+    // ABSL_LOG(INFO) << "ReadRemote sending read request for key '" << key << "' to server";
     
     // Create read request message
     size_t message_size = sizeof(MessageHeader) + key.size();
@@ -1671,7 +1833,7 @@ class RemoteDramDriver
     message_utils::LogMessageBuffer(message_buffer.data(), message_size, "Client sending read request");
     
     ABSL_LOG(INFO) << "Sending UCX read request: key='" << key << "', request_id=" << request_id;
-    std::cout << "📤 CLIENT: Sending read request [ID:" << request_id << "] key='" << key << "'" << std::endl;
+    // std::cout << "📤 CLIENT: Sending read request [ID:" << request_id << "] key='" << key << "'" << std::endl;
     
     // Create promise/future pair for read result
     auto [promise, future] = PromiseFuturePair<kvstore::ReadResult>::Make();
@@ -1725,7 +1887,7 @@ class RemoteDramDriver
       delete user_data;
     } else {
       // Send is in progress, will complete asynchronously via SendCallback
-      ABSL_LOG(INFO) << "UCX read request in progress for request_id=" << request_id;
+      // ABSL_LOG(INFO) << "UCX read request in progress for request_id=" << request_id;
       // Resources will be cleaned up in SendCallback
     }
     
@@ -1774,10 +1936,10 @@ class RemoteDramDriver
       ucx_manager.CompletePendingReadOperation(request_id, std::move(error_result));
     } else if (request != nullptr) {
       // Request is in progress, will complete asynchronously
-      ABSL_LOG(INFO) << "Posted client receive buffer for request_id=" << request_id;
+      // ABSL_LOG(INFO) << "Posted client receive buffer for request_id=" << request_id;
     } else {
       // Receive completed immediately (unlikely for read responses)
-      ABSL_LOG(INFO) << "Client receive completed immediately for request_id=" << request_id;
+      // ABSL_LOG(INFO) << "Client receive completed immediately for request_id=" << request_id;
       delete[] recv_buffer;
       delete user_data;
     }
@@ -1822,7 +1984,7 @@ class RemoteDramDriver
           absl::InternalError("Failed to post write response receive"));
     } else if (request != nullptr) {
       // Request is in progress, will complete asynchronously
-      ABSL_LOG(INFO) << "Posted client write response receive buffer for request_id=" << request_id;
+      // ABSL_LOG(INFO) << "Posted client write response receive buffer for request_id=" << request_id;
     } else {
       // Receive completed immediately (unlikely for write responses)
       ABSL_LOG(INFO) << "Client write response receive completed immediately for request_id=" << request_id;
