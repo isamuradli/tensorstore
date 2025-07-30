@@ -81,11 +81,11 @@ int main(int argc, char* argv[]) {
   // std::cout << "✓ Successfully transferred 4x4 tensor to Node 2's DRAM!" << std::endl;
   
   // Test additional kvstore operations
-  std::cout << "Testing additional kvstore write..." << std::endl;
+  std::cout << "\n\nTesting additional kvstore write..." << std::endl;
   
   // Write a simple key-value pair
 
-  for (int i = 1; i < 4; i++) {
+  for (int i = 1; i < 10; i++) {
     std::string index_str = std::to_string(i);
     std::string test_key = "testkey" + index_str;
     std::string value = "Data from Node" + index_str;

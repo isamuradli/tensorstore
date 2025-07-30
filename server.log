@@ -1,0 +1,168 @@
+=== Node 2 Server ===
+Starting remote_dram server on: 0.0.0.0:12345
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1753856142.140734  193717 remote_dram_kvstore.cc:1587] UCX Manager initialized successfully with socket support
+I0000 00:00:1753856142.140938  193717 remote_dram_kvstore.cc:2423] UCX worker progress task started with enhanced thread management
+I0000 00:00:1753856142.140953  193717 remote_dram_kvstore.cc:3250] Initializing UCX for server mode on 0.0.0.0:12345
+I0000 00:00:1753856142.140961  193717 remote_dram_kvstore.cc:1603] Creating UCX listener for address: 0.0.0.0:12345
+I0000 00:00:1753856142.140957  193730 remote_dram_kvstore.cc:2427] UCX worker progress polling started with optimized 1μs polling
+I0000 00:00:1753856142.140973  193717 remote_dram_kvstore.cc:1637] Binding to all interfaces (INADDR_ANY) on port 12345
+I0000 00:00:1753856142.140991  193717 remote_dram_kvstore.cc:1656] Attempting to create UCX listener with parameters configured
+I0000 00:00:1753856142.141068  193717 remote_dram_kvstore.cc:1689] UCX listener created successfully on 0.0.0.0:12345
+I0000 00:00:1753856142.161574  193717 remote_dram_kvstore.cc:3259] UCX server initialized successfully, listening on 0.0.0.0:12345
+✓ Remote DRAM server started successfully!
+✓ Server is ready to receive tensor data from Node 1
+✓ Data will be stored in this node's DRAM memory
+
+Server is running and waiting for connections...
+All tensor data received from Node 1 will be stored locally
+Press Ctrl+C to stop the server
+I0000 00:00:1753856151.948323  193730 remote_dram_kvstore.cc:563] UCX listener received connection request
+I0000 00:00:1753856151.963054  193730 remote_dram_kvstore.cc:579] Server endpoint created successfully for incoming connection
+I0000 00:00:1753856151.963304  193872 remote_dram_kvstore.cc:2232] Registered client endpoint, total clients: 1
+I0000 00:00:1753856151.991005  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856151.991110  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=5, key_len=0, value_len=0, request_id=1, checksum=0
+I0000 00:00:1753856151.991130  193730 remote_dram_kvstore.cc:753] Server received delete range request for prefix=''
+I0000 00:00:1753856151.991139  193730 remote_dram_kvstore.cc:759] Server deleted 0 keys with prefix ''
+I0000 00:00:1753856151.991176  193872 remote_dram_kvstore.cc:2400] Server sending delete range response: status_code=0, deleted_count=0
+I0000 00:00:1753856151.991239  193872 remote_dram_kvstore.cc:350] Server sending delete range response: status_code=0, deleted_count=0, request_id=1
+I0000 00:00:1753856151.991297  193872 remote_dram_kvstore.cc:372] Delete range response sent immediately
+I0000 00:00:1753856151.991308  193872 remote_dram_kvstore.cc:769] Sent delete range response for prefix: , deleted 0 keys
+I0000 00:00:1753856151.995446  193730 remote_dram_kvstore.cc:563] UCX listener received connection request
+I0000 00:00:1753856151.997570  193730 remote_dram_kvstore.cc:579] Server endpoint created successfully for incoming connection
+I0000 00:00:1753856151.997633  193872 remote_dram_kvstore.cc:2232] Registered client endpoint, total clients: 2
+I0000 00:00:1753856151.997864  193730 remote_dram_kvstore.cc:563] UCX listener received connection request
+I0000 00:00:1753856151.997983  193730 remote_dram_kvstore.cc:579] Server endpoint created successfully for incoming connection
+I0000 00:00:1753856151.998040  193872 remote_dram_kvstore.cc:2232] Registered client endpoint, total clients: 3
+I0000 00:00:1753856151.999014  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856151.999049  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=1, key_len=16, value_len=1024, request_id=10376293541461622785, checksum=628255986
+I0000 00:00:1753856151.999118  193730 remote_dram_kvstore.cc:693] Server stored key-value pair: key='bm/000/000000003', value_size=1024
+I0000 00:00:1753856151.999134  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856151.999154  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=1, key_len=16, value_len=1024, request_id=5764607523034234881, checksum=628255986
+I0000 00:00:1753856151.999201  193730 remote_dram_kvstore.cc:693] Server stored key-value pair: key='bm/000/000000009', value_size=1024
+I0000 00:00:1753856151.999440  193872 remote_dram_kvstore.cc:2383] Server sending write response: status_code=0
+I0000 00:00:1753856152.000001  193872 remote_dram_kvstore.cc:707] Sent write response for key: bm/000/000000003
+I0000 00:00:1753856152.000007  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000023  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=1, key_len=16, value_len=1024, request_id=5764607523034234881, checksum=628255986
+I0000 00:00:1753856152.000029  193872 remote_dram_kvstore.cc:2383] Server sending write response: status_code=0
+I0000 00:00:1753856152.000035  193872 remote_dram_kvstore.cc:707] Sent write response for key: bm/000/000000009
+I0000 00:00:1753856152.000069  193730 remote_dram_kvstore.cc:693] Server stored key-value pair: key='bm/000/000000000', value_size=1024
+I0000 00:00:1753856152.000107  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000107  193872 remote_dram_kvstore.cc:2383] Server sending write response: status_code=0
+I0000 00:00:1753856152.000136  193872 remote_dram_kvstore.cc:707] Sent write response for key: bm/000/000000000
+I0000 00:00:1753856152.000167  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=1, key_len=16, value_len=1024, request_id=1, checksum=628255986
+I0000 00:00:1753856152.000213  193730 remote_dram_kvstore.cc:693] Server stored key-value pair: key='bm/000/000000006', value_size=1024
+I0000 00:00:1753856152.000225  193730 remote_dram_kvstore.cc:318] Server write response sent: Success
+I0000 00:00:1753856152.000229  193730 remote_dram_kvstore.cc:318] Server write response sent: Success
+I0000 00:00:1753856152.000231  193730 remote_dram_kvstore.cc:318] Server write response sent: Success
+I0000 00:00:1753856152.000239  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000246  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=1, key_len=16, value_len=1024, request_id=10376293541461622786, checksum=628255986
+I0000 00:00:1753856152.000273  193872 remote_dram_kvstore.cc:2383] Server sending write response: status_code=0
+I0000 00:00:1753856152.000281  193872 remote_dram_kvstore.cc:707] Sent write response for key: bm/000/000000006
+I0000 00:00:1753856152.000291  193730 remote_dram_kvstore.cc:693] Server stored key-value pair: key='bm/000/000000008', value_size=1024
+I0000 00:00:1753856152.000296  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000303  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=1, key_len=16, value_len=1024, request_id=5764607523034234882, checksum=628255986
+I0000 00:00:1753856152.000300  193872 remote_dram_kvstore.cc:2383] Server sending write response: status_code=0
+I0000 00:00:1753856152.000318  193872 remote_dram_kvstore.cc:707] Sent write response for key: bm/000/000000008
+I0000 00:00:1753856152.000349  193730 remote_dram_kvstore.cc:693] Server stored key-value pair: key='bm/000/000000005', value_size=1024
+I0000 00:00:1753856152.000355  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000363  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=1, key_len=16, value_len=1024, request_id=5764607523034234882, checksum=628255986
+I0000 00:00:1753856152.000400  193872 remote_dram_kvstore.cc:2383] Server sending write response: status_code=0
+I0000 00:00:1753856152.000415  193872 remote_dram_kvstore.cc:707] Sent write response for key: bm/000/000000005
+I0000 00:00:1753856152.000408  193730 remote_dram_kvstore.cc:693] Server stored key-value pair: key='bm/000/000000001', value_size=1024
+I0000 00:00:1753856152.000433  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000441  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=1, key_len=16, value_len=1024, request_id=2, checksum=628255986
+I0000 00:00:1753856152.000472  193872 remote_dram_kvstore.cc:2383] Server sending write response: status_code=0
+I0000 00:00:1753856152.000486  193730 remote_dram_kvstore.cc:693] Server stored key-value pair: key='bm/000/000000002', value_size=1024
+I0000 00:00:1753856152.000496  193872 remote_dram_kvstore.cc:707] Sent write response for key: bm/000/000000001
+I0000 00:00:1753856152.000496  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000507  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=1, key_len=16, value_len=1024, request_id=10376293541461622787, checksum=628255986
+I0000 00:00:1753856152.000506  193872 remote_dram_kvstore.cc:2383] Server sending write response: status_code=0
+I0000 00:00:1753856152.000512  193872 remote_dram_kvstore.cc:707] Sent write response for key: bm/000/000000002
+I0000 00:00:1753856152.000551  193730 remote_dram_kvstore.cc:693] Server stored key-value pair: key='bm/000/000000004', value_size=1024
+I0000 00:00:1753856152.000557  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000565  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=1, key_len=16, value_len=1024, request_id=5764607523034234883, checksum=628255986
+I0000 00:00:1753856152.000586  193872 remote_dram_kvstore.cc:2383] Server sending write response: status_code=0
+I0000 00:00:1753856152.000593  193872 remote_dram_kvstore.cc:707] Sent write response for key: bm/000/000000004
+I0000 00:00:1753856152.000609  193730 remote_dram_kvstore.cc:693] Server stored key-value pair: key='bm/000/000000007', value_size=1024
+I0000 00:00:1753856152.000616  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000618  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=3, key_len=16, value_len=0, request_id=11, checksum=2989592
+I0000 00:00:1753856152.000616  193872 remote_dram_kvstore.cc:2383] Server sending write response: status_code=0
+I0000 00:00:1753856152.000621  193730 remote_dram_kvstore.cc:718] Server received read request for key='bm/000/000000008'
+I0000 00:00:1753856152.000626  193730 remote_dram_kvstore.cc:727] Server found key 'bm/000/000000008' with value size=1024
+I0000 00:00:1753856152.000622  193872 remote_dram_kvstore.cc:707] Sent write response for key: bm/000/000000007
+📤 SERVER: Found key 'bm/000/000000008' [ID:11] - sending response with 1024 bytes
+I0000 00:00:1753856152.000636  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000638  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=3, key_len=16, value_len=0, request_id=2, checksum=2989589
+I0000 00:00:1753856152.000641  193730 remote_dram_kvstore.cc:718] Server received read request for key='bm/000/000000005'
+I0000 00:00:1753856152.000643  193730 remote_dram_kvstore.cc:727] Server found key 'bm/000/000000005' with value size=1024
+📤 SERVER: Found key 'bm/000/000000005' [ID:2] - sending response with 1024 bytes
+I0000 00:00:1753856152.000641  193872 remote_dram_kvstore.cc:2365] Server sending read response: value_size=1024, status_code=0
+I0000 00:00:1753856152.000646  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000651  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=3, key_len=16, value_len=0, request_id=3, checksum=2989593
+I0000 00:00:1753856152.000654  193730 remote_dram_kvstore.cc:718] Server received read request for key='bm/000/000000009'
+I0000 00:00:1753856152.000659  193730 remote_dram_kvstore.cc:727] Server found key 'bm/000/000000009' with value size=1024
+📤 SERVER: Found key 'bm/000/000000009' [ID:3] - sending response with 1024 bytes
+I0000 00:00:1753856152.000663  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000665  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=3, key_len=16, value_len=0, request_id=4, checksum=2989587
+I0000 00:00:1753856152.000667  193730 remote_dram_kvstore.cc:718] Server received read request for key='bm/000/000000003'
+I0000 00:00:1753856152.000669  193730 remote_dram_kvstore.cc:727] Server found key 'bm/000/000000003' with value size=1024
+📤 SERVER: Found key 'bm/000/000000003' [ID:4] - sending response with 1024 bytes
+I0000 00:00:1753856152.000672  193872 remote_dram_kvstore.cc:742] Sent read response for key: bm/000/000000008
+I0000 00:00:1753856152.000674  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000679  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=3, key_len=16, value_len=0, request_id=5, checksum=2989588
+I0000 00:00:1753856152.000681  193730 remote_dram_kvstore.cc:718] Server received read request for key='bm/000/000000004'
+I0000 00:00:1753856152.000683  193730 remote_dram_kvstore.cc:727] Server found key 'bm/000/000000004' with value size=1024
+📤 SERVER: Found key 'bm/000/000000004' [ID:5] - sending response with 1024 bytes
+I0000 00:00:1753856152.000688  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000690  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=3, key_len=16, value_len=0, request_id=6, checksum=2989591
+I0000 00:00:1753856152.000693  193730 remote_dram_kvstore.cc:718] Server received read request for key='bm/000/000000007'
+I0000 00:00:1753856152.000691  193872 remote_dram_kvstore.cc:2365] Server sending read response: value_size=1024, status_code=0
+I0000 00:00:1753856152.000694  193730 remote_dram_kvstore.cc:727] Server found key 'bm/000/000000007' with value size=1024
+📤 SERVER: Found key 'bm/000/000000007' [ID:6] - sending response with 1024 bytes
+I0000 00:00:1753856152.000698  193872 remote_dram_kvstore.cc:742] Sent read response for key: bm/000/000000005
+I0000 00:00:1753856152.000700  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000702  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=3, key_len=16, value_len=0, request_id=7, checksum=2989590
+I0000 00:00:1753856152.000705  193730 remote_dram_kvstore.cc:718] Server received read request for key='bm/000/000000006'
+I0000 00:00:1753856152.000707  193730 remote_dram_kvstore.cc:727] Server found key 'bm/000/000000006' with value size=1024
+📤 SERVER: Found key 'bm/000/000000006' [ID:7] - sending response with 1024 bytes
+I0000 00:00:1753856152.000706  193872 remote_dram_kvstore.cc:2365] Server sending read response: value_size=1024, status_code=0
+I0000 00:00:1753856152.000712  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000714  193872 remote_dram_kvstore.cc:742] Sent read response for key: bm/000/000000009
+I0000 00:00:1753856152.000714  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=3, key_len=16, value_len=0, request_id=8, checksum=2989585
+I0000 00:00:1753856152.000719  193730 remote_dram_kvstore.cc:718] Server received read request for key='bm/000/000000001'
+I0000 00:00:1753856152.000721  193730 remote_dram_kvstore.cc:727] Server found key 'bm/000/000000001' with value size=1024
+📤 SERVER: Found key 'bm/000/000000001' [ID:8] - sending response with 1024 bytes
+I0000 00:00:1753856152.000724  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000729  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=3, key_len=16, value_len=0, request_id=9, checksum=2989584
+I0000 00:00:1753856152.000733  193730 remote_dram_kvstore.cc:718] Server received read request for key='bm/000/000000000'
+I0000 00:00:1753856152.000735  193730 remote_dram_kvstore.cc:727] Server found key 'bm/000/000000000' with value size=1024
+📤 SERVER: Found key 'bm/000/000000000' [ID:9] - sending response with 1024 bytes
+I0000 00:00:1753856152.000739  193730 remote_dram_kvstore.cc:590] UCX server receive completed with status: Success
+I0000 00:00:1753856152.000741  193730 remote_dram_kvstore.cc:614] Received message: magic=3735928559, type=3, key_len=16, value_len=0, request_id=10, checksum=2989586
+I0000 00:00:1753856152.000744  193730 remote_dram_kvstore.cc:718] Server received read request for key='bm/000/000000002'
+I0000 00:00:1753856152.000746  193730 remote_dram_kvstore.cc:727] Server found key 'bm/000/000000002' with value size=1024
+📤 SERVER: Found key 'bm/000/000000002' [ID:10] - sending response with 1024 bytes
+I0000 00:00:1753856152.000722  193872 remote_dram_kvstore.cc:2365] Server sending read response: value_size=1024, status_code=0
+I0000 00:00:1753856152.000801  193872 remote_dram_kvstore.cc:742] Sent read response for key: bm/000/000000003
+I0000 00:00:1753856152.000828  193872 remote_dram_kvstore.cc:2365] Server sending read response: value_size=1024, status_code=0
+I0000 00:00:1753856152.000835  193872 remote_dram_kvstore.cc:742] Sent read response for key: bm/000/000000004
+I0000 00:00:1753856152.000844  193872 remote_dram_kvstore.cc:2365] Server sending read response: value_size=1024, status_code=0
+I0000 00:00:1753856152.000851  193872 remote_dram_kvstore.cc:742] Sent read response for key: bm/000/000000007
+I0000 00:00:1753856152.000863  193872 remote_dram_kvstore.cc:2365] Server sending read response: value_size=1024, status_code=0
+I0000 00:00:1753856152.000870  193872 remote_dram_kvstore.cc:742] Sent read response for key: bm/000/000000006
+I0000 00:00:1753856152.000879  193872 remote_dram_kvstore.cc:2365] Server sending read response: value_size=1024, status_code=0
+I0000 00:00:1753856152.000885  193872 remote_dram_kvstore.cc:742] Sent read response for key: bm/000/000000001
+I0000 00:00:1753856152.000895  193872 remote_dram_kvstore.cc:2365] Server sending read response: value_size=1024, status_code=0
+I0000 00:00:1753856152.000901  193872 remote_dram_kvstore.cc:742] Sent read response for key: bm/000/000000000
+I0000 00:00:1753856152.000909  193872 remote_dram_kvstore.cc:2365] Server sending read response: value_size=1024, status_code=0
+I0000 00:00:1753856152.000919  193872 remote_dram_kvstore.cc:742] Sent read response for key: bm/000/000000002
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...

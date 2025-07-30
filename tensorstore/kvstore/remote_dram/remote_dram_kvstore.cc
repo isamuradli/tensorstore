@@ -13,8 +13,6 @@
 // limitations under the License.
 
 #include "remote_dram_kvstore.h"
-#include "ucx_memory_pool.h"
-#include "zero_copy_builder.h"
 
 #include <optional>
 #include <string>
@@ -322,67 +320,6 @@ struct ServerWriteResponseTask : public internal::AtomicReferenceCount<ServerWri
   }
 };
 
-// Server-side task for handling delete range responses safely with reference counting
-struct ServerDeleteRangeResponseTask : public internal::AtomicReferenceCount<ServerDeleteRangeResponseTask> {
-  ucp_ep_h client_endpoint;
-  uint64_t request_id;
-  uint32_t status_code;
-  uint32_t deleted_count;
-  std::unique_ptr<UcxBuffer> send_buffer;
-  
-  ServerDeleteRangeResponseTask(ucp_ep_h ep, uint64_t id, uint32_t status, uint32_t count)
-    : client_endpoint(ep), request_id(id), status_code(status), deleted_count(count) {}
-  
-  void Start() {
-    send_buffer = UcxBuffer::Create(sizeof(DeleteRangeResponse));
-    
-    DeleteRangeResponse* response = reinterpret_cast<DeleteRangeResponse*>(send_buffer->data());
-    response->header.magic_number = MESSAGE_MAGIC_NUMBER;
-    response->header.type = MessageType::DELETE_RANGE_RESPONSE;
-    response->header.key_length = 0;
-    response->header.value_length = 0;
-    response->header.request_id = request_id;
-    response->header.checksum = 0;
-    response->status_code = status_code;
-    response->deleted_count = deleted_count;
-    
-    // Debug: Log what we're about to send
-    ABSL_LOG(INFO) << "Server sending delete range response: status_code=" << status_code
-                   << ", deleted_count=" << deleted_count
-                   << ", request_id=" << request_id;
-    
-    // Send using UCX
-    ucp_request_param_t send_params;
-    send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-    send_params.cb.send = ServerSendCallback;
-    send_params.user_data = this;
-    
-    intrusive_ptr_increment(this);  // Add reference for the callback
-    
-    void* send_request = ucp_tag_send_nbx(client_endpoint, send_buffer->data(), 
-                                         sizeof(DeleteRangeResponse), 
-                                         UCX_TAG_DELETE_RANGE_RESPONSE, &send_params);
-    
-    if (UCS_PTR_IS_ERR(send_request)) {
-      ucs_status_t error_status = UCS_PTR_STATUS(send_request);
-      ABSL_LOG(ERROR) << "Failed to send delete range response: " << ucs_status_string(error_status);
-      intrusive_ptr_decrement(this);  // Cleanup
-    } else if (send_request == nullptr) {
-      // Send completed immediately
-      ABSL_LOG(INFO) << "Delete range response sent immediately";
-      intrusive_ptr_decrement(this);  // Cleanup
-    }
-  }
-  
-  static void ServerSendCallback(void* request, ucs_status_t status, void* user_data) {
-    auto* task = static_cast<ServerDeleteRangeResponseTask*>(user_data);
-    ABSL_LOG(INFO) << "Server delete range response sent: " << ucs_status_string(status);
-    
-    intrusive_ptr_decrement(task);  // Release reference
-    ucp_request_free(request);
-  }
-};
-
 // RemoteDramStorage Implementation
 void RemoteDramStorage::Store(const std::string& key, const absl::Cord& value) {
   absl::MutexLock lock(&mutex_);
@@ -409,23 +346,6 @@ bool RemoteDramStorage::Remove(const std::string& key) {
   return storage_.erase(key) > 0;
 }
 
-size_t RemoteDramStorage::RemoveRange(const std::string& prefix) {
-  absl::MutexLock lock(&mutex_);
-  size_t deleted_count = 0;
-  
-  auto it = storage_.begin();
-  while (it != storage_.end()) {
-    if (it->first.substr(0, prefix.length()) == prefix) {
-      it = storage_.erase(it);
-      deleted_count++;
-    } else {
-      ++it;
-    }
-  }
-  
-  return deleted_count;
-}
-
 std::vector<std::string> RemoteDramStorage::GetAllKeys() const {
   absl::MutexLock lock(&mutex_);
   std::vector<std::string> keys;
@@ -441,7 +361,6 @@ size_t RemoteDramStorage::GetKeyCount() const {
   return storage_.size();
 }
 
-
 /// UCX error handler callback
 void UcxErrorHandler(void* arg, ucp_ep_h ep, ucs_status_t status) {
   ABSL_LOG(ERROR) << "UCX: Connection error: " << ucs_status_string(status);
@@ -452,11 +371,6 @@ namespace {
 namespace jb = tensorstore::internal_json_binding;
 
 /// Send completion callback for UCX operations
-void SendCallback(void* request, ucs_status_t status, void* user_data);
-
-/// Multi-worker send callback for parallel processing (PHASE 2)
-void MultiWorkerSendCallback(void* request, ucs_status_t status, void* user_data);
-
 void SendCallback(void* request, ucs_status_t status, void* user_data) {
   // Handle the new user_data structure
   struct SendUserData {
@@ -492,72 +406,6 @@ void SendCallback(void* request, ucs_status_t status, void* user_data) {
   ucp_request_free(request);
 }
 
-/// Multi-worker send callback for parallel processing (PHASE 2)
-void MultiWorkerSendCallback(void* request, ucs_status_t status, void* user_data) {
-  struct MultiWorkerSendUserData {
-    uint64_t request_id;
-    char* buffer_to_free;
-    ClientWorkerContext* worker_context;
-  };
-  
-  auto* data = static_cast<MultiWorkerSendUserData*>(user_data);
-  uint64_t request_id = data->request_id;
-  char* buffer_to_free = data->buffer_to_free;
-  ClientWorkerContext* worker_context = data->worker_context;
-  
-  if (status == UCS_OK) {
-    std::cout << "✅ WORKER: Multi-worker send completed [ID:" << request_id 
-              << ", Worker:" << worker_context << "]" << std::endl;
-  } else {
-    std::cout << "❌ WORKER: Multi-worker send failed [ID:" << request_id 
-              << "] - " << ucs_status_string(status) << std::endl;
-  }
-  
-  absl::Status result_status = (status == UCS_OK) ? 
-    absl::OkStatus() : 
-    absl::InternalError(absl::StrFormat("Multi-worker UCX send failed: %s", ucs_status_string(status)));
-  
-  // Direct completion without dispatcher to eliminate serialization
-  worker_context->CompletePendingWriteOperation(request_id, result_status);
-  
-  // Free resources
-  delete[] buffer_to_free;
-  delete data;
-  ucp_request_free(request);
-}
-
-/// Fire-and-forget send callback for Phase 3 operations
-static void FireAndForgetSendCallbackImpl(void* request, ucs_status_t status, void* user_data) {
-  struct FireAndForgetUserData {
-    uint64_t request_id;
-    char* buffer_to_free;
-    ClientWorkerContext* worker_context;
-  };
-  
-  auto* data = static_cast<FireAndForgetUserData*>(user_data);
-  uint64_t request_id = data->request_id;
-  char* buffer_to_free = data->buffer_to_free;
-  ClientWorkerContext* worker_context = data->worker_context;
-  
-  if (status == UCS_OK) {
-    std::cout << "🚀 FIRE_AND_FORGET: Send completed [ID:" << request_id << "]" << std::endl;
-  } else {
-    std::cout << "❌ FIRE_AND_FORGET: Send failed [ID:" << request_id 
-              << "] - " << ucs_status_string(status) << std::endl;
-    ABSL_LOG(WARNING) << "Fire-and-forget write failed: " << ucs_status_string(status);
-  }
-  
-  // Decrement outstanding operations counter for flow control
-  if (worker_context) {
-    worker_context->DecrementOutstanding();
-  }
-  
-  // Free resources (no promise completion - already completed immediately)
-  delete[] buffer_to_free;
-  delete data;
-  ucp_request_free(request);
-}
-
 /// Connection callback for server-side client connections
 void UcxListenerCallback(ucp_conn_request_h conn_request, void* user_data) {
   ABSL_LOG(INFO) << "UCX listener received connection request";
@@ -583,6 +431,140 @@ void UcxListenerCallback(ucp_conn_request_h conn_request, void* user_data) {
   UcxCallbackDispatcher::ScheduleCallback([server_endpoint]() {
     UcxManager::Instance().RegisterClientEndpoint(server_endpoint);
   });
+}
+
+/// Adaptive receive completion callback for server-side message handling
+void AdaptiveServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_recv_info_t* info, void* user_data) {
+  ABSL_LOG(INFO) << "UCX adaptive server receive completed with status: " << ucs_status_string(status);
+  
+  // Extract adaptive user data structure
+  struct AdaptiveReceiveUserData {
+    char* buffer;
+    bool is_from_pool;
+    size_t buffer_size;
+  };
+  
+  AdaptiveReceiveUserData* adaptive_data = static_cast<AdaptiveReceiveUserData*>(user_data);
+  char* buffer = adaptive_data->buffer;
+  bool is_from_pool = adaptive_data->is_from_pool;
+  // size_t buffer_size = adaptive_data->buffer_size;  // Currently unused
+  
+  if (status == UCS_OK && info->length >= sizeof(MessageHeader)) {
+    // Log message for debugging
+    message_utils::LogMessageBuffer(buffer, info->length, "Server received adaptive message");
+    
+    // Process the received message
+    MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer);
+    
+    // Verify message integrity
+    if (!message_utils::VerifyMessageHeader(header, info->length)) {
+      ABSL_LOG(ERROR) << "Adaptive message integrity verification failed, discarding message";
+      goto cleanup_and_exit;
+    }
+    
+    ABSL_LOG(INFO) << "Adaptive received message: magic=" << std::dec << header->magic_number
+                   << ", type=" << static_cast<uint32_t>(header->type)
+                   << ", key_len=" << header->key_length 
+                   << ", value_len=" << header->value_length
+                   << ", request_id=" << header->request_id
+                   << ", checksum=" << header->checksum;
+    
+    if (header->type == MessageType::WRITE_REQUEST) {
+      // Handle write request
+      const char* data_ptr = buffer + sizeof(MessageHeader);
+      
+      // Verify payload checksum
+      if (header->checksum != 0) {
+        uint32_t calculated_checksum = message_utils::CalculateChecksum(data_ptr, 
+                                                                       header->key_length + header->value_length);
+        if (calculated_checksum != header->checksum) {
+          ABSL_LOG(ERROR) << "Adaptive payload checksum mismatch";
+          goto cleanup_and_exit;
+        }
+      }
+      
+      std::string key(data_ptr, header->key_length);
+      absl::Cord value(std::string(data_ptr + header->key_length, header->value_length));
+      
+      // Store in server memory
+      UcxManager::Instance().GetStorage().Store(key, value);
+      
+      ABSL_LOG(INFO) << "Adaptive server stored key-value pair: key='" << key 
+                     << "', value_size=" << value.size();
+      
+      // Send write response back to client using safe callback dispatcher
+      uint64_t request_id = header->request_id;
+      std::string key_copy = key;
+      UcxCallbackDispatcher::ScheduleCallback([request_id, key_copy]() {
+        auto& ucx_manager = UcxManager::Instance();
+        ucp_ep_h client_endpoint = ucx_manager.GetClientEndpoint();
+        if (client_endpoint) {
+          ucx_manager.SendWriteResponse(client_endpoint, request_id, 0);  // 0 = success
+          ABSL_LOG(INFO) << "Sent adaptive write response for key: " << key_copy;
+        } else {
+          ABSL_LOG(ERROR) << "No client endpoint available to send adaptive write response";
+        }
+      });
+      
+    } else if (header->type == MessageType::READ_REQUEST) {
+      // Handle read request
+      const char* data_ptr = buffer + sizeof(MessageHeader);
+      std::string key(data_ptr, header->key_length);
+      
+      ABSL_LOG(INFO) << "Adaptive server received read request for key='" << key << "'";
+      
+      // Look up the key in storage
+      auto& storage = UcxManager::Instance().GetStorage();
+      auto value = storage.Get(key);
+      
+      if (value.has_value()) {
+        ABSL_LOG(INFO) << "Adaptive server found key '" << key << "' with value size=" << value->size();
+      } else {
+        ABSL_LOG(INFO) << "Adaptive server key '" << key << "' not found";
+      }
+      
+      // Send read response back to client using safe callback dispatcher
+      uint64_t request_id = header->request_id;
+      std::string key_copy = key;
+      UcxCallbackDispatcher::ScheduleCallback([request_id, key_copy, value]() {
+        auto& ucx_manager = UcxManager::Instance();
+        ucp_ep_h client_endpoint = ucx_manager.GetClientEndpoint();
+        if (client_endpoint) {
+          ucx_manager.SendReadResponse(client_endpoint, request_id, value);
+          ABSL_LOG(INFO) << "Sent adaptive read response for key: " << key_copy;
+        } else {
+          ABSL_LOG(ERROR) << "No client endpoint available to send adaptive read response";
+        }
+      });
+    }
+    
+    // Post another adaptive receive buffer if we're not shutting down
+    // Use a safer approach without capturing reference
+    UcxCallbackDispatcher::ScheduleCallback([]() {
+      auto& ucx_manager = UcxManager::Instance();
+      if (ucx_manager.GetContext() && ucx_manager.GetWorker()) {
+        ucx_manager.PostAdaptiveServerReceive();
+      }
+    });
+  } else {
+    ABSL_LOG(ERROR) << "Failed to receive adaptive message: " << ucs_status_string(status);
+  }
+  
+cleanup_and_exit:
+  // Clean up the buffer - return to pool if it came from pool
+  if (is_from_pool) {
+    UcxManager::Instance().GetBufferPool().ReleaseBuffer(buffer);
+  } else {
+    delete[] buffer;
+  }
+  
+  // Clean up user data
+  delete adaptive_data;
+  
+  // Free the UCX request
+  if (request != nullptr) {
+    ucp_request_free(request);
+  }
 }
 
 /// Receive completion callback for server-side message handling
@@ -742,34 +724,6 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
           ABSL_LOG(INFO) << "Sent read response for key: " << key_copy;
         } else {
           ABSL_LOG(ERROR) << "No client endpoint available to send read response for key: " << key_copy;
-        }
-      });
-      
-    } else if (header->type == MessageType::DELETE_RANGE_REQUEST) {
-      // Handle delete range request
-      const char* data_ptr = buffer + header_offset + sizeof(MessageHeader);
-      std::string prefix(data_ptr, header->key_length);
-      
-      ABSL_LOG(INFO) << "Server received delete range request for prefix='" << prefix << "'";
-      
-      // Perform range deletion in storage
-      auto& storage = UcxManager::Instance().GetStorage();
-      size_t deleted_count = storage.RemoveRange(prefix);
-      
-      ABSL_LOG(INFO) << "Server deleted " << deleted_count << " keys with prefix '" << prefix << "'";
-      
-      // Send delete range response back to client using safe callback dispatcher
-      uint64_t request_id = header->request_id;
-      std::string prefix_copy = prefix;
-      UcxCallbackDispatcher::ScheduleCallback([request_id, prefix_copy, deleted_count]() {
-        auto& ucx_manager = UcxManager::Instance();
-        ucp_ep_h client_endpoint = ucx_manager.GetClientEndpoint();
-        if (client_endpoint) {
-          ucx_manager.SendDeleteRangeResponse(client_endpoint, request_id, 0, deleted_count);  // 0 = success
-          ABSL_LOG(INFO) << "Sent delete range response for prefix: " << prefix_copy 
-                         << ", deleted " << deleted_count << " keys";
-        } else {
-          ABSL_LOG(ERROR) << "No client endpoint available to send delete range response for prefix: " << prefix_copy;
         }
       });
     }
@@ -957,129 +911,6 @@ void ClientWriteResponseCallback(void* request, ucs_status_t status, const ucp_t
   ucp_request_free(request);
 }
 
-/// Client-side callback for handling delete range responses
-void ClientDeleteRangeResponseCallback(void* request, ucs_status_t status, const ucp_tag_recv_info_t* info, void* user_data) {
-  // Extract user data structure
-  struct DeleteRangeUserData {
-    uint64_t request_id;
-    char* buffer;
-  };
-  DeleteRangeUserData* delete_data = static_cast<DeleteRangeUserData*>(user_data);
-  uint64_t request_id = delete_data->request_id;
-  char* buffer = delete_data->buffer;
-  
-  if (status == UCS_OK && info->length >= sizeof(DeleteRangeResponse)) {
-    // The data was received into the buffer we provided
-    std::vector<char> response_data(info->length);
-    std::memcpy(response_data.data(), buffer, info->length);
-    
-    // Debug: Log the raw buffer content
-    message_utils::LogMessageBuffer(response_data.data(), info->length, "Client received delete range response");
-    
-    DeleteRangeResponse* response = reinterpret_cast<DeleteRangeResponse*>(response_data.data());
-    
-    ABSL_LOG(INFO) << "Client received delete range response: status_code=" << response->status_code
-                   << ", deleted_count=" << response->deleted_count
-                   << ", request_id=" << response->header.request_id;
-    
-    absl::Status result_status;
-    if (response->status_code == 0) {
-      // Success
-      result_status = absl::OkStatus();
-      ABSL_LOG(INFO) << "Delete range successful for request_id=" << response->header.request_id
-                     << ", deleted " << response->deleted_count << " keys";
-    } else {
-      // Error
-      result_status = absl::InternalError("Delete range failed on server");
-      ABSL_LOG(ERROR) << "Delete range failed for request_id=" << response->header.request_id;
-    }
-    
-    // Complete the pending delete range operation using safe callback dispatcher
-    UcxCallbackDispatcher::ScheduleCallback([request_id, result_status]() {
-      UcxManager::Instance().CompletePendingOperation(request_id, result_status);
-    });
-    
-    delete[] buffer;
-    delete delete_data;
-  } else {
-    ABSL_LOG(ERROR) << "Failed to receive delete range response: " << ucs_status_string(status);
-    
-    // Complete with error using safe callback dispatcher
-    UcxCallbackDispatcher::ScheduleCallback([request_id, status]() {
-      UcxManager::Instance().CompletePendingOperation(request_id, 
-          absl::InternalError(absl::StrFormat("Failed to receive delete range response: %s", 
-                                             ucs_status_string(status))));
-    });
-    
-    delete[] buffer;
-    delete delete_data;
-  }
-  
-  ucp_request_free(request);
-}
-
-/// Client-side callback for handling write responses from worker contexts
-void ClientWorkerWriteResponseCallback(void* request, ucs_status_t status, const ucp_tag_recv_info_t* info, void* user_data) {
-  // ABSL_LOG(INFO) << "UCX worker write response received with status: " << ucs_status_string(status);
-  
-  // Extract user data structure (includes worker context)
-  struct WorkerWriteUserData {
-    uint64_t request_id;
-    char* buffer;
-    ClientWorkerContext* worker_context;
-  };
-  WorkerWriteUserData* write_data = static_cast<WorkerWriteUserData*>(user_data);
-  uint64_t request_id = write_data->request_id;
-  char* buffer = write_data->buffer;
-  ClientWorkerContext* worker_context = write_data->worker_context;
-  
-  if (status == UCS_OK && info->length >= sizeof(WriteResponse)) {
-    // The data was received into the buffer we provided
-    // Copy to ensure we have valid data access (same pattern as read)
-    std::vector<char> response_data(info->length);
-    std::memcpy(response_data.data(), buffer, info->length);
-    
-    // Debug: Log the raw buffer content
-    // ABSL_LOG(INFO) << "Worker received write response " << info->length << " bytes";
-    message_utils::LogMessageBuffer(response_data.data(), info->length, "Worker received write response");
-    
-    WriteResponse* response = reinterpret_cast<WriteResponse*>(response_data.data());
-    
-    // ABSL_LOG(INFO) << "Worker received write response: status_code=" << response->status_code
-    //                << ", request_id=" << response->header.request_id;
-    
-    absl::Status result_status;
-    if (response->status_code == 0) {
-      // Success
-      result_status = absl::OkStatus();
-      // ABSL_LOG(INFO) << "Worker write successful for request_id=" << response->header.request_id;
-      std::cout << "📥 WORKER: Write response [ID:" << response->header.request_id << "] SUCCESS" << std::endl;
-    } else {
-      // Error
-      result_status = absl::InternalError("Write failed on server");
-      ABSL_LOG(INFO) << "Worker write failed for request_id=" << response->header.request_id;
-      std::cout << "❌ WORKER: Write response [ID:" << response->header.request_id << "] FAILED" << std::endl;
-    }
-    
-    // Complete the pending write operation directly (no dispatcher needed for worker context)
-    worker_context->CompletePendingWriteOperation(request_id, result_status);
-    
-    delete[] buffer;
-    delete write_data;
-  } else {
-    ABSL_LOG(ERROR) << "Failed to receive worker write response: " << ucs_status_string(status);
-    
-    // Complete with error directly
-    worker_context->CompletePendingWriteOperation(request_id, 
-        absl::InternalError(absl::StrFormat("Failed to receive worker write response: %s", 
-                                           ucs_status_string(status))));
-    
-    delete[] buffer;
-    delete write_data;
-  }
-  
-  ucp_request_free(request);
-}
 
 /// Send a notification to the server process that new data has been written
 void NotifyServerOfNewData(const kvstore::Key& key, const absl::Cord& value) {
@@ -1161,9 +992,7 @@ bool VerifyMessageHeader(const MessageHeader* header, size_t total_message_size)
   if (header->type != MessageType::WRITE_REQUEST && 
       header->type != MessageType::WRITE_RESPONSE &&
       header->type != MessageType::READ_REQUEST &&
-      header->type != MessageType::READ_RESPONSE &&
-      header->type != MessageType::DELETE_RANGE_REQUEST &&
-      header->type != MessageType::DELETE_RANGE_RESPONSE) {
+      header->type != MessageType::READ_RESPONSE) {
     ABSL_LOG(ERROR) << "Invalid message type: " << static_cast<uint32_t>(header->type);
     return false;
   }
@@ -1237,280 +1066,166 @@ void LogMessageBuffer(const char* buffer, size_t size, const std::string& prefix
 
 }  // namespace message_utils
 
-// ============================================================================
-// UCX Memory Pool Implementation (PHASE 4)
-// ============================================================================
-
-UcxMemoryPool& UcxMemoryPool::Instance() {
-  static UcxMemoryPool instance;
-  return instance;
-}
-
-void UcxMemoryPool::Initialize() {
-  Initialize(Config{});
-}
-
-void UcxMemoryPool::Initialize(const Config& config) {
+// AdaptiveBufferPool Implementation
+void AdaptiveBufferPool::Initialize() {
   absl::MutexLock lock(&mutex_);
   
   if (initialized_) {
-    return;  // Already initialized
-  }
-  
-  config_ = config;
-  
-  // Initialize small buffer pool
-  small_buffers_.reserve(config.small_pool_size);
-  for (size_t i = 0; i < config.small_pool_size; ++i) {
-    small_buffers_.push_back(std::make_unique<PooledBuffer>(config.small_buffer_size));
-  }
-  
-  // Initialize medium buffer pool
-  medium_buffers_.reserve(config.medium_pool_size);
-  for (size_t i = 0; i < config.medium_pool_size; ++i) {
-    medium_buffers_.push_back(std::make_unique<PooledBuffer>(config.medium_buffer_size));
-  }
-  
-  // Initialize large buffer pool
-  large_buffers_.reserve(config.large_pool_size);
-  for (size_t i = 0; i < config.large_pool_size; ++i) {
-    large_buffers_.push_back(std::make_unique<PooledBuffer>(config.large_buffer_size));
-  }
-  
-  initialized_ = true;
-  ABSL_LOG(INFO) << "UCX Memory Pool initialized: "
-                 << config.small_pool_size << " small (" << config.small_buffer_size << "B), "
-                 << config.medium_pool_size << " medium (" << config.medium_buffer_size << "B), "
-                 << config.large_pool_size << " large (" << config.large_buffer_size << "B)";
-}
-
-std::vector<std::unique_ptr<UcxMemoryPool::PooledBuffer>>& UcxMemoryPool::SelectPool(size_t required_size) {
-  absl::MutexLock lock(&mutex_);
-  
-  if (required_size <= config_.small_buffer_size) {
-    return small_buffers_;
-  } else if (required_size <= config_.medium_buffer_size) {
-    return medium_buffers_;
-  } else {
-    return large_buffers_;
-  }
-}
-
-const std::vector<std::unique_ptr<UcxMemoryPool::PooledBuffer>>& UcxMemoryPool::SelectPool(size_t required_size) const {
-  absl::MutexLock lock(&mutex_);
-  
-  if (required_size <= config_.small_buffer_size) {
-    return small_buffers_;
-  } else if (required_size <= config_.medium_buffer_size) {
-    return medium_buffers_;
-  } else {
-    return large_buffers_;
-  }
-}
-
-std::unique_ptr<UcxMemoryPool::BufferLease> UcxMemoryPool::AcquireBuffer(size_t required_size) {
-  total_allocations_.fetch_add(1, std::memory_order_relaxed);
-  
-  // Ensure pool is initialized
-  {
-    absl::MutexLock lock(&mutex_);
-    if (!initialized_) {
-      Initialize();
-    }
-  }
-  
-  // Select appropriate pool
-  auto& pool = SelectPool(required_size);
-  
-  // Try to find available buffer in pool
-  {
-    absl::MutexLock lock(&mutex_);
-    for (auto& buffer : pool) {
-      bool expected = false;
-      if (buffer->in_use.compare_exchange_weak(expected, true, std::memory_order_acquire)) {
-        // Successfully acquired buffer from pool
-        pool_hits_.fetch_add(1, std::memory_order_relaxed);
-        return std::make_unique<BufferLease>(buffer->data, buffer->size, buffer.get());
-      }
-    }
-  }
-  
-  // No available buffer in pool - create new one
-  pool_misses_.fetch_add(1, std::memory_order_relaxed);
-  
-  // Determine actual size to allocate
-  size_t alloc_size;
-  {
-    absl::MutexLock lock(&mutex_);
-    if (required_size <= config_.small_buffer_size) {
-      alloc_size = config_.small_buffer_size;
-    } else if (required_size <= config_.medium_buffer_size) {
-      alloc_size = config_.medium_buffer_size;
-    } else if (required_size <= config_.large_buffer_size) {
-      alloc_size = config_.large_buffer_size;
-    } else {
-      // Very large buffer - allocate exact size
-      alloc_size = required_size;
-    }
-  }
-  
-  auto new_buffer = std::make_unique<PooledBuffer>(alloc_size);
-  new_buffer->in_use.store(true, std::memory_order_release);
-  
-  BufferLease* lease = new BufferLease(new_buffer->data, new_buffer->size, new_buffer.get());
-  
-  // Add new buffer to appropriate pool for future reuse
-  {
-    absl::MutexLock lock(&mutex_);
-    if (alloc_size == config_.small_buffer_size) {
-      small_buffers_.push_back(std::move(new_buffer));
-    } else if (alloc_size == config_.medium_buffer_size) {
-      medium_buffers_.push_back(std::move(new_buffer));
-    } else if (alloc_size == config_.large_buffer_size) {
-      large_buffers_.push_back(std::move(new_buffer));
-    } else {
-      // Very large buffer - don't add to pool, will be deleted when lease expires
-      new_buffer.release();  // Transfer ownership to lease
-    }
-  }
-  
-  return std::unique_ptr<BufferLease>(lease);
-}
-
-UcxMemoryPool::PoolStats UcxMemoryPool::GetStats() const {
-  absl::MutexLock lock(&mutex_);
-  
-  PoolStats stats = {};
-  stats.small_pool_size = small_buffers_.size();
-  stats.medium_pool_size = medium_buffers_.size();
-  stats.large_pool_size = large_buffers_.size();
-  
-  // Count buffers in use
-  for (const auto& buffer : small_buffers_) {
-    if (buffer->in_use.load()) stats.small_in_use++;
-  }
-  for (const auto& buffer : medium_buffers_) {
-    if (buffer->in_use.load()) stats.medium_in_use++;
-  }
-  for (const auto& buffer : large_buffers_) {
-    if (buffer->in_use.load()) stats.large_in_use++;
-  }
-  
-  stats.total_allocations = total_allocations_.load();
-  stats.pool_hits = pool_hits_.load();
-  stats.pool_misses = pool_misses_.load();
-  
-  return stats;
-}
-
-// ============================================================================
-// Zero-Copy Message Builder Implementation (PHASE 4)
-// ============================================================================
-
-void ZeroCopyMessageBuilder::CopyCordToBuffer(const absl::Cord& cord, char* dest_buffer) {
-  if (cord.size() == 0) {
     return;
   }
   
-  // PHASE 4: Optimize based on Cord's internal structure
-  if (cord.size() <= 4096) {
-    // For small cords, try to get flat representation
-    auto flat_view = cord.TryFlat();
-    if (flat_view.has_value()) {
-      // Cord is already flat - single memcpy
-      std::memcpy(dest_buffer, flat_view->data(), flat_view->size());
+  // Pre-allocate initial buffers for each size category
+  for (size_t i = 0; i < kInitialBuffers; ++i) {
+    buffer_pool_.push_back(CreateBuffer(kSmallBufferSize));
+    buffer_pool_.push_back(CreateBuffer(kMediumBufferSize));
+    buffer_pool_.push_back(CreateBuffer(kLargeBufferSize));
+  }
+  
+  initialized_ = true;
+  ABSL_LOG(INFO) << "AdaptiveBufferPool initialized with " << buffer_pool_.size() << " buffers";
+}
+
+char* AdaptiveBufferPool::AcquireBuffer(size_t required_size, size_t* actual_size) {
+  absl::MutexLock lock(&mutex_);
+  
+  if (!initialized_) {
+    Initialize();
+  }
+  
+  size_t optimal_size = SelectBufferSize(required_size);
+  
+  // Try to find an available buffer of the optimal size
+  for (size_t i = 0; i < buffer_pool_.size(); ++i) {
+    auto& buffer = buffer_pool_[i];
+    if (!buffer->in_use && buffer->size == optimal_size) {
+      buffer->in_use = true;
+      *actual_size = buffer->size;
+      buffer_lookup_[buffer->data] = i; // Store correct index for fast lookup
+      ABSL_LOG(INFO) << "AdaptiveBufferPool: Reused buffer of size " << buffer->size;
+      return buffer->data;
+    }
+  }
+  
+  // If no suitable buffer found and we haven't reached the limit, create a new one
+  if (buffer_pool_.size() < kMaxBuffers) {
+    auto new_buffer = CreateBuffer(optimal_size);
+    char* buffer_ptr = new_buffer->data;
+    new_buffer->in_use = true;
+    buffer_lookup_[buffer_ptr] = buffer_pool_.size();
+    buffer_pool_.push_back(std::move(new_buffer));
+    *actual_size = optimal_size;
+    ABSL_LOG(INFO) << "AdaptiveBufferPool: Created new buffer of size " << optimal_size;
+    return buffer_ptr;
+  }
+  
+  // Fallback: find any available buffer that's large enough
+  for (size_t i = 0; i < buffer_pool_.size(); ++i) {
+    auto& buffer = buffer_pool_[i];
+    if (!buffer->in_use && buffer->size >= required_size) {
+      buffer->in_use = true;
+      *actual_size = buffer->size;
+      buffer_lookup_[buffer->data] = i; // Store correct index for fast lookup
+      ABSL_LOG(WARNING) << "AdaptiveBufferPool: Using oversized buffer " << buffer->size 
+                        << " for required size " << required_size;
+      return buffer->data;
+    }
+  }
+  
+  // Last resort: create a temporary buffer (not pooled)
+  ABSL_LOG(ERROR) << "AdaptiveBufferPool: Pool exhausted, creating temporary buffer";
+  char* temp_buffer = new char[optimal_size];
+  *actual_size = optimal_size;
+  return temp_buffer;
+}
+
+void AdaptiveBufferPool::ReleaseBuffer(char* buffer) {
+  absl::MutexLock lock(&mutex_);
+  
+  auto it = buffer_lookup_.find(buffer);
+  if (it != buffer_lookup_.end()) {
+    size_t index = it->second;
+    if (index < buffer_pool_.size()) {
+      buffer_pool_[index]->in_use = false;
+      buffer_lookup_.erase(it);
+      ABSL_LOG(INFO) << "AdaptiveBufferPool: Released buffer back to pool";
       return;
     }
   }
   
-  // Fallback to manual copying for complex cords
-  size_t pos = 0;
-  for (absl::string_view chunk : cord.Chunks()) {
-    std::memcpy(dest_buffer + pos, chunk.data(), chunk.size());
-    pos += chunk.size();
+  // This was a temporary buffer, just delete it
+  ABSL_LOG(WARNING) << "AdaptiveBufferPool: Deleting temporary buffer";
+  delete[] buffer;
+}
+
+void AdaptiveBufferPool::CleanupOldBuffers(std::chrono::seconds max_age) {
+  absl::MutexLock lock(&mutex_);
+  
+  auto now = std::chrono::steady_clock::now();
+  size_t cleaned = 0;
+  
+  for (auto it = buffer_pool_.begin(); it != buffer_pool_.end();) {
+    if (!(*it)->in_use && (now - (*it)->allocated_time) > max_age) {
+      // Remove from lookup map
+      buffer_lookup_.erase((*it)->data);
+      it = buffer_pool_.erase(it);
+      cleaned++;
+    } else {
+      ++it;
+    }
+  }
+  
+  if (cleaned > 0) {
+    ABSL_LOG(INFO) << "AdaptiveBufferPool: Cleaned up " << cleaned << " old buffers";
   }
 }
 
-std::unique_ptr<ZeroCopyMessageBuilder::MessageBuffer> 
-ZeroCopyMessageBuilder::BuildWriteMessage(const kvstore::Key& key, const absl::Cord& value, uint64_t request_id) {
+AdaptiveBufferPool::Stats AdaptiveBufferPool::GetStats() const {
+  absl::MutexLock lock(&mutex_);
   
-  size_t total_size = sizeof(MessageHeader) + key.size() + value.size();
+  Stats stats{};
+  stats.total_buffers = buffer_pool_.size();
   
-  // Get buffer from pool (NO ALLOCATION if available)
-  auto buffer_lease = UcxMemoryPool::Instance().AcquireBuffer(total_size);
+  for (const auto& buffer : buffer_pool_) {
+    if (buffer->in_use) {
+      stats.buffers_in_use++;
+    }
+    
+    stats.memory_usage_bytes += buffer->size;
+    
+    if (buffer->size == kSmallBufferSize) {
+      stats.small_buffers++;
+    } else if (buffer->size == kMediumBufferSize) {
+      stats.medium_buffers++;
+    } else if (buffer->size == kLargeBufferSize) {
+      stats.large_buffers++;
+    }
+  }
   
-  // Construct message directly in UCX buffer (NO INTERMEDIATE COPIES)
-  char* buffer = buffer_lease->data();
-  MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer);
-  char* payload = buffer + sizeof(MessageHeader);
-  
-  // Copy key directly to final location (SINGLE COPY)
-  std::memcpy(payload, key.data(), key.size());
-  
-  // Copy value directly to final location (SINGLE COPY)
-  CopyCordToBuffer(value, payload + key.size());
-  
-  // Initialize header directly with payload checksum
-  message_utils::InitializeMessageHeader(
-      header, MessageType::WRITE_REQUEST,
-      static_cast<uint32_t>(key.size()),
-      static_cast<uint32_t>(value.size()),
-      request_id, payload);
-  
-  return std::make_unique<MessageBuffer>(
-      std::move(buffer_lease), header, payload, total_size);
+  return stats;
 }
 
-std::unique_ptr<ZeroCopyMessageBuilder::MessageBuffer> 
-ZeroCopyMessageBuilder::BuildReadMessage(const kvstore::Key& key, uint64_t request_id) {
+void AdaptiveBufferPool::Shutdown() {
+  absl::MutexLock lock(&mutex_);
   
-  size_t total_size = sizeof(MessageHeader) + key.size();
+  ABSL_LOG(INFO) << "AdaptiveBufferPool: Shutting down with " << buffer_pool_.size() << " buffers";
   
-  // Get buffer from pool
-  auto buffer_lease = UcxMemoryPool::Instance().AcquireBuffer(total_size);
-  
-  // Construct message directly in UCX buffer
-  char* buffer = buffer_lease->data();
-  MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer);
-  char* payload = buffer + sizeof(MessageHeader);
-  
-  // Copy key directly to final location (SINGLE COPY)
-  std::memcpy(payload, key.data(), key.size());
-  
-  // Initialize header for read request
-  message_utils::InitializeMessageHeader(
-      header, MessageType::READ_REQUEST,
-      static_cast<uint32_t>(key.size()),
-      0,  // No value for read request
-      request_id, payload);
-  
-  return std::make_unique<MessageBuffer>(
-      std::move(buffer_lease), header, payload, total_size);
+  buffer_pool_.clear();
+  buffer_lookup_.clear();
+  initialized_ = false;
 }
 
-/// Zero-copy callback for UCX send completion
-void ZeroCopyWriteCallback(void* request, ucs_status_t status, void* user_data) {
-  // user_data contains ZeroCopyUserData with MessageBuffer
-  auto* data = static_cast<ZeroCopyUserData*>(user_data);
-  uint64_t request_id = data->request_id;
-  ClientWorkerContext* worker_context = data->worker_context;
-  
-  if (status == UCS_OK) {
-    std::cout << "⚡ ZERO_COPY: Write completed [ID:" << request_id << "]" << std::endl;
+size_t AdaptiveBufferPool::SelectBufferSize(size_t required_size) const {
+  if (required_size <= kSmallBufferSize) {
+    return kSmallBufferSize;
+  } else if (required_size <= kMediumBufferSize) {
+    return kMediumBufferSize;
   } else {
-    std::cout << "❌ ZERO_COPY: Write failed [ID:" << request_id 
-              << "] - " << ucs_status_string(status) << std::endl;
-    ABSL_LOG(WARNING) << "Zero-copy write failed: " << ucs_status_string(status);
+    return kLargeBufferSize;
   }
-  
-  // Decrement outstanding operations counter for flow control
-  if (worker_context) {
-    worker_context->DecrementOutstanding();
-  }
-  
-  // Buffer automatically returns to pool when MessageBuffer destructor runs
-  delete data;
-  ucp_request_free(request);
+}
+
+std::unique_ptr<AdaptiveBufferPool::BufferInfo> AdaptiveBufferPool::CreateBuffer(size_t size) {
+  return std::make_unique<BufferInfo>(size);
 }
 
 // UcxManager Implementation
@@ -1539,61 +1254,21 @@ absl::Status UcxManager::Initialize() {
                                                ucs_status_string(status)));
   }
   
-  // Configure UCX for high-throughput rendezvous protocol
-  ABSL_LOG(INFO) << "Configuring UCX for high-throughput rendezvous protocol";
-  
-  // Set rendezvous threshold to 8KB for optimal large message handling
-  status = ucp_config_modify(config, "RNDV_THRESH", "8192");
-  if (status != UCS_OK) {
-    ABSL_LOG(WARNING) << "Failed to set UCX RNDV_THRESH: " << ucs_status_string(status);
-  } else {
-    ABSL_LOG(INFO) << "UCX RNDV_THRESH set to 8192 bytes";
-  }
-  
-  // Enable memory registration cache for better performance
-  status = ucp_config_modify(config, "REG_CACHE", "y");
-  if (status != UCS_OK) {
-    ABSL_LOG(WARNING) << "Failed to set UCX REG_CACHE: " << ucs_status_string(status);
-  } else {
-    ABSL_LOG(INFO) << "UCX REG_CACHE enabled";
-  }
-  
-  // Increase memory bandwidth utilization (use single rail for optimal performance)
-  status = ucp_config_modify(config, "MAX_RNDV_RAILS", "1");
-  if (status != UCS_OK) {
-    ABSL_LOG(WARNING) << "Failed to set UCX MAX_RNDV_RAILS: " << ucs_status_string(status);
-  } else {
-    ABSL_LOG(INFO) << "UCX MAX_RNDV_RAILS set to 1";
-  }
-  
-  // Disable memory hooks for better stability under high load
-  status = ucp_config_modify(config, "MEM_HOOKS", "no");
-  if (status != UCS_OK) {
-    ABSL_LOG(WARNING) << "Failed to set UCX MEM_HOOKS: " << ucs_status_string(status);
-  } else {
-    ABSL_LOG(INFO) << "UCX MEM_HOOKS disabled for stability";
-  }
-  
-  // Set UCX context parameters with tagged messaging support and high-throughput optimizations
+  // Set UCX context parameters with tagged messaging support
   ucp_params.field_mask = UCP_PARAM_FIELD_FEATURES | 
                           UCP_PARAM_FIELD_TAG_SENDER_MASK |
                           UCP_PARAM_FIELD_REQUEST_SIZE |
-                          UCP_PARAM_FIELD_REQUEST_INIT |
-                          UCP_PARAM_FIELD_MT_WORKERS_SHARED |
-                          UCP_PARAM_FIELD_ESTIMATED_NUM_EPS;
+                          UCP_PARAM_FIELD_REQUEST_INIT;
   
   // Use features that support local communication (shared memory) and networking
   ucp_params.features = UCP_FEATURE_TAG | 
                         UCP_FEATURE_WAKEUP |
                         UCP_FEATURE_AM |
-                        UCP_FEATURE_RMA |  // Remote Memory Access for better performance
-                        UCP_FEATURE_STREAM;  // Stream support for large data transfers
+                        UCP_FEATURE_RMA;  // Remote Memory Access for better performance
   
   ucp_params.tag_sender_mask = 0xF000000000000000ULL;  // Use upper 4 bits for message type
   ucp_params.request_size = 0;  // Use default request size
   ucp_params.request_init = nullptr;  // No request initialization
-  ucp_params.mt_workers_shared = 1;  // Enable multi-threaded worker sharing for better performance
-  ucp_params.estimated_num_eps = 16;  // Estimate higher number of endpoints for better resource allocation
   
   // Create UCX context
   status = ucp_init(&ucp_params, config, &context_);
@@ -1604,13 +1279,11 @@ absl::Status UcxManager::Initialize() {
                                                ucs_status_string(status)));
   }
   
-  // Create UCX worker with socket support and high-throughput optimizations
+  // Create UCX worker with socket support
   ucp_worker_params_t worker_params;
   worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE |
-                             UCP_WORKER_PARAM_FIELD_CPU_MASK |
-                             UCP_WORKER_PARAM_FIELD_EVENTS;
+                             UCP_WORKER_PARAM_FIELD_CPU_MASK;
   worker_params.thread_mode = UCS_THREAD_MODE_MULTI;
-  worker_params.events = UCP_WAKEUP_TAG_SEND | UCP_WAKEUP_TAG_RECV | UCP_WAKEUP_RMA;
   // Use default CPU mask (all CPUs available)
   UCS_CPU_ZERO(&worker_params.cpu_mask);
   
@@ -1622,12 +1295,12 @@ absl::Status UcxManager::Initialize() {
                                                ucs_status_string(status)));
   }
   
-  // Update atomic worker handle for lock-free progress polling
-  worker_atomic_.store(worker_, std::memory_order_release);
-  
     initialized_ = true;
     ABSL_LOG(INFO) << "UCX Manager initialized successfully with socket support";
   }  // Release mutex here
+  
+  // Initialize the adaptive buffer pool
+  buffer_pool_.Initialize();
   
   // Start worker progress polling outside of mutex scope
   StartWorkerProgressTask();
@@ -1733,11 +1406,11 @@ Result<ucp_listener_h> UcxManager::CreateListener(const std::string& listen_addr
   // Store the listener handle for cleanup
   listener_ = listener;
   
-  // Post initial receive buffers for incoming messages
-  constexpr int num_preposted_receives = 2000;
-  // ABSL_LOG(INFO) << "Posting " << num_preposted_receives << " initial receive buffers";
-  for (int i = 0; i < num_preposted_receives; ++i) {
-    PostServerReceiveNoLock();
+  // Post initial receive buffers using adaptive buffer management
+  constexpr int initial_adaptive_buffers = 100;  // Increased to handle more concurrent requests
+  ABSL_LOG(INFO) << "Posting " << initial_adaptive_buffers << " initial adaptive receive buffers";
+  for (int i = 0; i < initial_adaptive_buffers; ++i) {
+    PostAdaptiveServerReceiveNoLock();
   }
   
   return listener;
@@ -1825,339 +1498,6 @@ Result<ucp_ep_h> UcxManager::CreateClientEndpoint(const std::string& server_addr
   return client_endpoint;
 }
 
-// Create endpoint using specific worker context to avoid protocol conflicts
-Result<ucp_ep_h> CreateWorkerSpecificEndpoint(ucp_worker_h worker, const std::string& server_addr) {
-  if (!worker) {
-    return absl::FailedPreconditionError("Worker context not available");
-  }
-  
-  ABSL_LOG(INFO) << "Creating worker-specific UCX endpoint to: " << server_addr;
-  
-  // Parse server address  
-  std::string host;
-  uint16_t port;
-  size_t colon_pos = server_addr.find(':');
-  if (colon_pos == std::string::npos) {
-    return absl::InvalidArgumentError("Invalid server address format. Expected host:port");
-  }
-  
-  host = server_addr.substr(0, colon_pos);
-  try {
-    port = static_cast<uint16_t>(std::stoi(server_addr.substr(colon_pos + 1)));
-  } catch (const std::exception& e) {
-    return absl::InvalidArgumentError(absl::StrFormat("Invalid port in server address: %s", e.what()));
-  }
-  
-  // Configure socket address for TCP connection
-  struct sockaddr_in server_sockaddr;
-  memset(&server_sockaddr, 0, sizeof(server_sockaddr));
-  server_sockaddr.sin_family = AF_INET;
-  server_sockaddr.sin_port = htons(port);
-  
-  if (inet_pton(AF_INET, host.c_str(), &server_sockaddr.sin_addr) <= 0) {
-    return absl::InvalidArgumentError(absl::StrFormat("Invalid IP address: %s", host));
-  }
-  
-  // Configure endpoint parameters for socket connection
-  ucp_ep_params_t ep_params;
-  memset(&ep_params, 0, sizeof(ep_params));
-  ep_params.field_mask = UCP_EP_PARAM_FIELD_FLAGS | UCP_EP_PARAM_FIELD_SOCK_ADDR;
-  ep_params.flags = UCP_EP_PARAMS_FLAGS_CLIENT_SERVER;
-  ep_params.sockaddr.addr = reinterpret_cast<const struct sockaddr*>(&server_sockaddr);
-  ep_params.sockaddr.addrlen = sizeof(server_sockaddr);
-  
-  ABSL_LOG(INFO) << "Creating worker-specific endpoint with socket connection";
-  ABSL_LOG(INFO) << "  Server address: " << server_addr;
-  ABSL_LOG(INFO) << "  Socket family: " << server_sockaddr.sin_family;
-  ABSL_LOG(INFO) << "  Socket port: " << ntohs(server_sockaddr.sin_port);
-  ABSL_LOG(INFO) << "  Worker: " << worker;
-  
-  // Create the client endpoint using the worker-specific context
-  ucp_ep_h client_endpoint;
-  ucs_status_t status = ucp_ep_create(worker, &ep_params, &client_endpoint);
-  
-  ABSL_LOG(INFO) << "Worker-specific endpoint creation result: " << ucs_status_string(status) << " (" << status << ")";
-  
-  if (status != UCS_OK) {
-    ABSL_LOG(ERROR) << "Failed to create worker-specific UCX endpoint: " << ucs_status_string(status);
-    return absl::InternalError(absl::StrFormat(
-        "Failed to create UCX client endpoint: %s", ucs_status_string(status)));
-  }
-  
-  ABSL_LOG(INFO) << "Worker-specific UCX client endpoint created successfully to " << server_addr;
-  
-  return client_endpoint;
-}
-
-// ============================================================================
-// ClientWorkerContext Implementation
-// ============================================================================
-
-void ClientWorkerContext::RegisterPendingWriteOperation(uint64_t request_id, Promise<void> promise) {
-  absl::MutexLock lock(&pending_ops_mutex);
-  auto op = std::make_unique<PendingWriteOperation>(request_id, std::move(promise));
-  pending_write_operations[request_id] = std::move(op);
-}
-
-void ClientWorkerContext::RegisterPendingReadOperation(uint64_t request_id, Promise<kvstore::ReadResult> promise) {
-  absl::MutexLock lock(&pending_ops_mutex);
-  auto op = std::make_unique<PendingReadOperation>(request_id, std::move(promise));
-  pending_read_operations[request_id] = std::move(op);
-}
-
-void ClientWorkerContext::CompletePendingWriteOperation(uint64_t request_id, absl::Status status) {
-  absl::MutexLock lock(&pending_ops_mutex);
-  auto it = pending_write_operations.find(request_id);
-  if (it != pending_write_operations.end()) {
-    if (status.ok()) {
-      it->second->promise.SetResult(absl::OkStatus());
-    } else {
-      it->second->promise.SetResult(status);
-    }
-    pending_write_operations.erase(it);
-  }
-}
-
-void ClientWorkerContext::CompletePendingReadOperation(uint64_t request_id, kvstore::ReadResult result) {
-  absl::MutexLock lock(&pending_ops_mutex);
-  auto it = pending_read_operations.find(request_id);
-  if (it != pending_read_operations.end()) {
-    it->second->promise.SetResult(std::move(result));
-    pending_read_operations.erase(it);
-  }
-}
-
-void ClientWorkerContext::WorkerProgressTask() {
-  ABSL_LOG(INFO) << "ClientWorkerContext progress polling started with optimized 1μs polling";
-  
-  int idle_count = 0;
-  while (active.load(std::memory_order_acquire)) {
-    if (worker) {
-      // Poll for progress without mutex - lock-free operation
-      unsigned progress_made = ucp_worker_progress(worker);
-      
-      if (progress_made > 0) {
-        idle_count = 0;  // Reset idle counter on activity
-      } else {
-        idle_count++;
-        // Adaptive polling: busy wait initially, then micro-sleep
-        if (idle_count > 1000) {
-          // High idle count: use 1μs sleep (100x faster than original 100μs)
-          std::this_thread::sleep_for(std::chrono::microseconds(1));
-        } else if (idle_count > 100) {
-          // Medium idle count: yield CPU
-          std::this_thread::yield();
-        }
-        // Low idle count: busy poll for ultra-low latency
-      }
-    } else {
-      // No worker available, sleep briefly
-      std::this_thread::sleep_for(std::chrono::microseconds(1));
-    }
-  }
-  
-  ABSL_LOG(INFO) << "ClientWorkerContext progress polling stopped";
-}
-
-Future<TimestampedStorageGeneration> ClientWorkerContext::WriteFireAndForget(
-    const kvstore::Key& key, const absl::Cord& value, ucp_ep_h endpoint) {
-  
-  // PHASE 3: Flow control - wait if too many outstanding operations
-  while (!CanSendOperation()) {
-    std::this_thread::sleep_for(std::chrono::microseconds(10));
-  }
-  
-  // Generate request ID (for logging/debugging only)
-  uint64_t request_id = GenerateRequestId();
-  
-  ABSL_LOG(INFO) << "PHASE3: Fire-and-forget write for key '" << key 
-                 << "' with " << value.size() << " bytes, request_id=" << request_id;
-  
-  // Convert absl::Cord to std::string for content copying
-  std::string value_content = std::string(value);
-  
-  // Create write message with proper content copying
-  size_t message_size = sizeof(MessageHeader) + key.size() + value_content.size();
-  std::vector<char> message_buffer(message_size);
-  
-  // Copy key and value data
-  char* data_ptr = message_buffer.data() + sizeof(MessageHeader);
-  std::memcpy(data_ptr, key.data(), key.size());
-  std::memcpy(data_ptr + key.size(), value_content.data(), value_content.size());
-  
-  // Initialize message header
-  MessageHeader* header = reinterpret_cast<MessageHeader*>(message_buffer.data());
-  message_utils::InitializeMessageHeader(header, MessageType::WRITE_REQUEST, 
-                                        static_cast<uint32_t>(key.size()),
-                                        static_cast<uint32_t>(value_content.size()),
-                                        request_id, data_ptr);
-  
-  std::cout << "🚀 FIRE_AND_FORGET: Sending write request [ID:" << request_id << "]" << std::endl;
-  
-  // Increment outstanding operations counter for flow control
-  IncrementOutstanding();
-  
-  // Prepare UCX send parameters
-  ucp_request_param_t send_params;
-  memset(&send_params, 0, sizeof(send_params));
-  send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-  send_params.cb.send = FireAndForgetSendCallbackImpl;
-  
-  // Allocate stable buffer for UCX send
-  char* stable_buffer = new char[message_size];
-  std::memcpy(stable_buffer, message_buffer.data(), message_size);
-  
-  // User data for callback with worker context
-  struct FireAndForgetUserData {
-    uint64_t request_id;
-    char* buffer_to_free;
-    ClientWorkerContext* worker_context;
-  };
-  auto* user_data = new FireAndForgetUserData{request_id, stable_buffer, this};
-  send_params.user_data = user_data;
-  
-  // Send the message using UCX
-  ucp_tag_t tag = UCX_TAG_WRITE_REQUEST;
-  void* request = ucp_tag_send_nbx(endpoint, stable_buffer, message_size, tag, &send_params);
-  
-  if (UCS_PTR_IS_ERR(request)) {
-    ucs_status_t error_status = UCS_PTR_STATUS(request);
-    ABSL_LOG(ERROR) << "Fire-and-forget UCX send failed: " << ucs_status_string(error_status);
-    DecrementOutstanding();
-    delete[] stable_buffer;
-    delete user_data;
-    
-    // Return immediate error
-    return absl::InternalError(absl::StrFormat("UCX send failed: %s", 
-        ucs_status_string(error_status)));
-  } else if (request == nullptr) {
-    // Send completed immediately
-    ABSL_LOG(INFO) << "Fire-and-forget write sent immediately for request_id=" << request_id;
-    DecrementOutstanding();
-    delete[] stable_buffer;
-    delete user_data;
-  }
-  // else: Send is in progress, will complete asynchronously via FireAndForgetSendCallback
-  
-  // PHASE 3: IMMEDIATE COMPLETION - Don't wait for server ACK!
-  TimestampedStorageGeneration result;
-  result.generation = StorageGeneration::FromString("fire_and_forget");
-  result.time = absl::Now();
-  
-  return MakeReadyFuture<TimestampedStorageGeneration>(result);
-}
-
-Future<TimestampedStorageGeneration> ClientWorkerContext::WriteZeroCopy(
-    const kvstore::Key& key, const absl::Cord& value, ucp_ep_h endpoint) {
-  
-  // PHASE 4: Flow control - wait if too many outstanding operations
-  while (!CanSendOperation()) {
-    std::this_thread::sleep_for(std::chrono::microseconds(10));
-  }
-  
-  // Generate request ID (for logging/debugging only)
-  uint64_t request_id = GenerateRequestId();
-  
-  // ABSL_LOG(INFO) << "PHASE4: Zero-copy write for key '" << key 
-                //  << "' with " << value.size() << " bytes, request_id=" << request_id;
-  
-  // Build message directly in UCX buffer (NO INTERMEDIATE COPIES)
-  auto message = ZeroCopyMessageBuilder::BuildWriteMessage(key, value, request_id);
-  
-  std::cout << "⚡ ZERO_COPY: Sending write request [ID:" << request_id << "]" << std::endl;
-  
-  // Increment outstanding operations counter for flow control
-  IncrementOutstanding();
-  
-  // Prepare UCX send parameters
-  ucp_request_param_t send_params;
-  memset(&send_params, 0, sizeof(send_params));
-  send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-  send_params.cb.send = ZeroCopyWriteCallback;
-  
-  // User data for callback with zero-copy buffer
-  auto* user_data = new ZeroCopyUserData(request_id, std::move(message), this);
-  send_params.user_data = user_data;
-  
-  // Send directly from zero-copy buffer
-  ucp_tag_t tag = UCX_TAG_WRITE_REQUEST;
-  void* request = ucp_tag_send_nbx(endpoint, user_data->message_buffer->buffer_lease->data(), 
-                                   user_data->message_buffer->total_size, tag, &send_params);
-  
-  if (UCS_PTR_IS_ERR(request)) {
-    ucs_status_t error_status = UCS_PTR_STATUS(request);
-    ABSL_LOG(ERROR) << "Zero-copy UCX send failed: " << ucs_status_string(error_status);
-    DecrementOutstanding();
-    delete user_data;
-    
-    // Return immediate error
-    return absl::InternalError(absl::StrFormat("UCX send failed: %s", 
-        ucs_status_string(error_status)));
-  } else if (request == nullptr) {
-    // Send completed immediately
-    ABSL_LOG(INFO) << "Zero-copy write sent immediately for request_id=" << request_id;
-    DecrementOutstanding();
-    delete user_data;
-  }
-  // else: Send is in progress, will complete asynchronously via ZeroCopyWriteCallback
-  
-  // PHASE 4: IMMEDIATE COMPLETION - Don't wait for server ACK!
-  TimestampedStorageGeneration result;
-  result.generation = StorageGeneration::FromString("zero_copy_write");
-  result.time = absl::Now();
-  
-  return MakeReadyFuture<TimestampedStorageGeneration>(result);
-}
-
-void ClientWorkerContext::Shutdown() {
-  // Stop progress thread
-  active.store(false, std::memory_order_release);
-  if (progress_thread && progress_thread->joinable()) {
-    progress_thread->join();
-  }
-  
-  // Complete any pending operations with cancelled status
-  {
-    absl::MutexLock lock(&pending_ops_mutex);
-    for (auto& [id, op] : pending_write_operations) {
-      op->promise.SetResult(absl::CancelledError("ClientWorkerContext shutting down"));
-    }
-    pending_write_operations.clear();
-    
-    for (auto& [id, op] : pending_read_operations) {
-      kvstore::ReadResult cancelled_result;
-      cancelled_result.state = kvstore::ReadResult::kMissing;
-      cancelled_result.stamp.generation = StorageGeneration::NoValue();
-      cancelled_result.stamp.time = absl::Now();
-      op->promise.SetResult(std::move(cancelled_result));
-    }
-    pending_read_operations.clear();
-  }
-  
-  // Process any remaining UCX events before cleanup
-  if (worker) {
-    // Brief processing to clear any pending operations
-    for (int i = 0; i < 5; ++i) {
-      ucp_worker_progress(worker);
-    }
-  }
-  
-  // Cleanup UCX endpoint and worker
-  if (endpoint) {
-    ucp_ep_destroy(endpoint);
-    endpoint = nullptr;
-  }
-  
-  if (worker) {
-    ucp_worker_destroy(worker);
-    worker = nullptr;
-  }
-}
-
-// ============================================================================
-// UcxManager Implementation with Multi-Worker Support  
-// ============================================================================
-
 void UcxManager::RegisterPendingOperation(uint64_t request_id, Promise<void> promise, MessageType type) {
   absl::MutexLock lock(&mutex_);
   auto op = std::make_unique<PendingWriteOperation>(request_id, std::move(promise));
@@ -2197,77 +1537,6 @@ uint64_t UcxManager::GenerateRequestId() {
   return next_request_id_++;
 }
 
-// ============================================================================
-// Multi-Worker Pool Implementation
-// ============================================================================
-
-absl::Status UcxManager::InitializeWorkerPool(size_t num_workers) {
-  absl::MutexLock lock(&mutex_);
-  
-  if (worker_pool_initialized_) {
-    return absl::OkStatus(); // Already initialized
-  }
-  
-  if (!initialized_) {
-    return absl::FailedPreconditionError("UCX context must be initialized before worker pool");
-  }
-  
-  ABSL_LOG(INFO) << "Initializing worker pool with " << num_workers << " workers for parallel operations";
-  
-  client_workers_.reserve(num_workers);
-  
-  for (size_t i = 0; i < num_workers; ++i) {
-    auto worker_context = std::make_unique<ClientWorkerContext>();
-    
-    // Create UCX worker for this client context
-    ucp_worker_params_t worker_params;
-    worker_params.field_mask = UCP_WORKER_PARAM_FIELD_THREAD_MODE;
-    worker_params.thread_mode = UCS_THREAD_MODE_MULTI;
-    
-    ucs_status_t status = ucp_worker_create(context_, &worker_params, &worker_context->worker);
-    if (status != UCS_OK) {
-      return absl::InternalError(absl::StrFormat("Failed to create UCX worker %zu: %s", 
-                                                 i, ucs_status_string(status)));
-    }
-    
-    // Start progress thread for this worker
-    worker_context->progress_thread = std::make_unique<std::thread>(
-      [worker_context = worker_context.get()]() {
-        worker_context->WorkerProgressTask();
-      }
-    );
-    
-    client_workers_.push_back(std::move(worker_context));
-    ABSL_LOG(INFO) << "Created worker " << i << " with dedicated progress thread";
-  }
-  
-  worker_pool_initialized_ = true;
-  ABSL_LOG(INFO) << "Worker pool initialization complete with " << num_workers << " parallel workers";
-  
-  return absl::OkStatus();
-}
-
-ClientWorkerContext* UcxManager::GetWorkerForNewOperation() {
-  if (!worker_pool_initialized_ || client_workers_.empty()) {
-    ABSL_LOG(WARNING) << "Worker pool not initialized, falling back to single-worker mode";
-    return nullptr;
-  }
-  
-  // Round-robin load balancing
-  size_t index = next_worker_index_.fetch_add(1, std::memory_order_relaxed) % client_workers_.size();
-  return client_workers_[index].get();
-}
-
-ClientWorkerContext* UcxManager::SelectWorkerForKey(const kvstore::Key& key) {
-  if (!worker_pool_initialized_ || client_workers_.empty()) {
-    return nullptr;
-  }
-  
-  // Key-based sharding for better cache locality (optional optimization)
-  size_t index = std::hash<std::string>{}(std::string(key)) % client_workers_.size();
-  return client_workers_[index].get();
-}
-
 void UcxManager::RegisterClientEndpoint(ucp_ep_h client_endpoint) {
   absl::MutexLock lock(&mutex_);
   client_endpoints_.push_back(client_endpoint);
@@ -2302,21 +1571,6 @@ ucp_ep_h UcxManager::GetClientEndpoint() const {
 }
 
 void UcxManager::PostServerReceive() {
-  // HPC OPTIMIZATION: Post receives for write, read, and delete range requests for maximum throughput
-  absl::MutexLock lock(&mutex_);
-  PostSingleServerReceiveNoLock(UCX_TAG_WRITE_REQUEST);
-  PostSingleServerReceiveNoLock(UCX_TAG_READ_REQUEST);
-  PostSingleServerReceiveNoLock(UCX_TAG_DELETE_RANGE_REQUEST);
-}
-
-void UcxManager::PostServerReceiveNoLock() {
-  // HPC OPTIMIZATION: Post receives for write, read, and delete range requests for maximum throughput
-  PostSingleServerReceiveNoLock(UCX_TAG_WRITE_REQUEST);
-  PostSingleServerReceiveNoLock(UCX_TAG_READ_REQUEST);
-  PostSingleServerReceiveNoLock(UCX_TAG_DELETE_RANGE_REQUEST);
-}
-
-void UcxManager::PostSingleServerReceiveNoLock(ucp_tag_t target_tag) {
   // Allocate buffer for incoming message
   constexpr size_t max_message_size = 64 * 1024;  // 64KB max message
   char* recv_buffer = new char[max_message_size];
@@ -2327,9 +1581,54 @@ void UcxManager::PostSingleServerReceiveNoLock(ucp_tag_t target_tag) {
   recv_params.cb.recv = ServerReceiveCallback;
   recv_params.user_data = recv_buffer;
   
-  // HPC OPTIMIZATION: Use specific tags for high-performance message matching
-  ucp_tag_t tag = target_tag;           // Match specific request type
-  ucp_tag_t tag_mask = UCX_TAG_MASK;    // Use proper tag mask for performance - server handles all message types
+  ucp_tag_t tag = 0;  // Accept any tag for now
+  ucp_tag_t tag_mask = 0;  // Accept any tag - server handles all message types
+  
+  ucp_worker_h worker_handle;
+  {
+    absl::MutexLock lock(&mutex_);
+    worker_handle = worker_;
+  }
+  
+  if (!worker_handle) {
+    ABSL_LOG(ERROR) << "Cannot post server receive: worker is null";
+    delete[] recv_buffer;
+    return;
+  }
+  
+  void* request = ucp_tag_recv_nbx(worker_handle, recv_buffer, max_message_size, 
+                                   tag, tag_mask, &recv_params);
+  
+  if (UCS_PTR_IS_ERR(request)) {
+    ABSL_LOG(ERROR) << "Failed to post server receive: " 
+                    << ucs_status_string(UCS_PTR_STATUS(request));
+    delete[] recv_buffer;
+  } else if (request != nullptr) {
+    // Request is in progress, will complete asynchronously
+    // ABSL_LOG(INFO) << "Posted server receive buffer";
+    
+    // Track the request for cleanup
+    absl::MutexLock lock(&mutex_);
+    active_requests_.push_back(request);
+  } else {
+    // Receive completed immediately (unlikely)
+    delete[] recv_buffer;
+  }
+}
+
+void UcxManager::PostServerReceiveNoLock() {
+  // Allocate buffer for incoming message
+  constexpr size_t max_message_size = 64 * 1024;  // 64KB max message
+  char* recv_buffer = new char[max_message_size];
+  
+  // Post non-blocking receive
+  ucp_request_param_t recv_params;
+  recv_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
+  recv_params.cb.recv = ServerReceiveCallback;
+  recv_params.user_data = recv_buffer;
+  
+  ucp_tag_t tag = 0;  // Accept any tag for now
+  ucp_tag_t tag_mask = 0;  // Accept any tag - server handles all message types
   
   if (!worker_) {
     ABSL_LOG(ERROR) << "Cannot post server receive: worker is null";
@@ -2346,13 +1645,131 @@ void UcxManager::PostSingleServerReceiveNoLock(ucp_tag_t target_tag) {
     delete[] recv_buffer;
   } else if (request != nullptr) {
     // Request is in progress, will complete asynchronously
-    // ABSL_LOG(INFO) << "Posted server receive buffer";
+    ABSL_LOG(INFO) << "Posted server receive buffer";
     
     // Track the request for cleanup (mutex already held)
     active_requests_.push_back(request);
   } else {
     // Receive completed immediately (unlikely)
     delete[] recv_buffer;
+  }
+}
+
+void UcxManager::PostAdaptiveServerReceive() {
+  // Use adaptive buffer pool for optimal memory usage
+  size_t actual_buffer_size;
+  char* recv_buffer = buffer_pool_.AcquireBuffer(sizeof(MessageHeader) + 18432, &actual_buffer_size);
+  
+  // Create user data structure to track buffer origin
+  struct AdaptiveReceiveUserData {
+    char* buffer;
+    bool is_from_pool;
+    size_t buffer_size;
+  };
+  
+  AdaptiveReceiveUserData* user_data = new AdaptiveReceiveUserData{
+    recv_buffer, 
+    true,  // Mark as from pool for proper cleanup
+    actual_buffer_size
+  };
+  
+  // Post non-blocking receive
+  ucp_request_param_t recv_params;
+  recv_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
+  recv_params.cb.recv = AdaptiveServerReceiveCallback;
+  recv_params.user_data = user_data;
+  
+  ucp_tag_t tag = 0;  // Accept any tag for now
+  ucp_tag_t tag_mask = 0;  // Accept any tag - server handles all message types
+  
+  ucp_worker_h worker_handle;
+  {
+    absl::MutexLock lock(&mutex_);
+    worker_handle = worker_;
+  }
+  
+  if (!worker_handle) {
+    ABSL_LOG(ERROR) << "Cannot post adaptive server receive: worker is null";
+    buffer_pool_.ReleaseBuffer(recv_buffer);
+    delete user_data;
+    return;
+  }
+  
+  void* request = ucp_tag_recv_nbx(worker_handle, recv_buffer, actual_buffer_size, 
+                                   tag, tag_mask, &recv_params);
+  
+  if (UCS_PTR_IS_ERR(request)) {
+    ABSL_LOG(ERROR) << "Failed to post adaptive server receive: " 
+                    << ucs_status_string(UCS_PTR_STATUS(request));
+    buffer_pool_.ReleaseBuffer(recv_buffer);
+    delete user_data;
+  } else if (request != nullptr) {
+    // Request is in progress, will complete asynchronously
+    // ABSL_LOG(INFO) << "Posted adaptive server receive buffer of size " << actual_buffer_size;
+    
+    // Track the request for cleanup
+    absl::MutexLock lock(&mutex_);
+    active_requests_.push_back(request);
+  } else {
+    // Receive completed immediately (unlikely)
+    buffer_pool_.ReleaseBuffer(recv_buffer);
+    delete user_data;
+  }
+}
+
+void UcxManager::PostAdaptiveServerReceiveNoLock() {
+  // Use adaptive buffer pool for optimal memory usage (mutex already held for main state)
+  // Buffer pool has its own mutex, so it's safe to call from here
+  size_t actual_buffer_size;
+  char* recv_buffer = buffer_pool_.AcquireBuffer(sizeof(MessageHeader) + 18432, &actual_buffer_size);
+  
+  // Create user data structure to track buffer origin
+  struct AdaptiveReceiveUserData {
+    char* buffer;
+    bool is_from_pool;
+    size_t buffer_size;
+  };
+  
+  AdaptiveReceiveUserData* user_data = new AdaptiveReceiveUserData{
+    recv_buffer, 
+    true,  // Mark as from pool for proper cleanup
+    actual_buffer_size
+  };
+  
+  // Post non-blocking receive
+  ucp_request_param_t recv_params;
+  recv_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
+  recv_params.cb.recv = AdaptiveServerReceiveCallback;
+  recv_params.user_data = user_data;
+  
+  ucp_tag_t tag = 0;  // Accept any tag for now
+  ucp_tag_t tag_mask = 0;  // Accept any tag - server handles all message types
+  
+  if (!worker_) {
+    ABSL_LOG(ERROR) << "Cannot post adaptive server receive: worker is null";
+    buffer_pool_.ReleaseBuffer(recv_buffer);
+    delete user_data;
+    return;
+  }
+  
+  void* request = ucp_tag_recv_nbx(worker_, recv_buffer, actual_buffer_size, 
+                                   tag, tag_mask, &recv_params);
+  
+  if (UCS_PTR_IS_ERR(request)) {
+    ABSL_LOG(ERROR) << "Failed to post adaptive server receive: " 
+                    << ucs_status_string(UCS_PTR_STATUS(request));
+    buffer_pool_.ReleaseBuffer(recv_buffer);
+    delete user_data;
+  } else if (request != nullptr) {
+    // Request is in progress, will complete asynchronously
+    // ABSL_LOG(INFO) << "Posted adaptive server receive buffer of size " << actual_buffer_size;
+    
+    // Track the request for cleanup (mutex already held)
+    active_requests_.push_back(request);
+  } else {
+    // Receive completed immediately (unlikely)
+    buffer_pool_.ReleaseBuffer(recv_buffer);
+    delete user_data;
   }
 }
 
@@ -2428,24 +1845,6 @@ void UcxManager::SendWriteResponse(ucp_ep_h client_endpoint, uint64_t request_id
   task->Start();
 }
 
-void UcxManager::SendDeleteRangeResponse(ucp_ep_h client_endpoint, uint64_t request_id, 
-                                         uint32_t status_code, uint32_t deleted_count) {
-  if (!client_endpoint) {
-    ABSL_LOG(ERROR) << "Cannot send delete range response: client endpoint is null";
-    return;
-  }
-  
-  // Use the safe ServerDeleteRangeResponseTask with proper reference counting
-  auto task = internal::MakeIntrusivePtr<ServerDeleteRangeResponseTask>(
-      client_endpoint, request_id, status_code, deleted_count);
-  
-  ABSL_LOG(INFO) << "Server sending delete range response: status_code=" << status_code
-                 << ", deleted_count=" << deleted_count;
-  
-  // Start the task - it will handle the entire send operation safely
-  task->Start();
-}
-
 void UcxManager::StartWorkerProgressTask() {
   if (progress_task_running_.load()) {
     return;
@@ -2466,34 +1865,41 @@ void UcxManager::StartWorkerProgressTask() {
 }
 
 void UcxManager::WorkerProgressTask() {
-  ABSL_LOG(INFO) << "UCX worker progress polling started with optimized 1μs polling";
+  ABSL_LOG(INFO) << "UCX worker progress polling started";
   
-  int idle_count = 0;
-  while (progress_task_running_.load(std::memory_order_acquire)) {
-    ucp_worker_h current_worker = worker_atomic_.load(std::memory_order_acquire);
-    
-    if (current_worker) {
-      // Poll for progress without mutex - lock-free operation
-      unsigned progress_made = ucp_worker_progress(current_worker);
-      
-      if (progress_made > 0) {
-        idle_count = 0;  // Reset idle counter on activity
-      } else {
-        idle_count++;
-        // Adaptive polling: busy wait initially, then micro-sleep
-        if (idle_count > 1000) {
-          // High idle count: use 1μs sleep (100x faster than original 100μs)
-          std::this_thread::sleep_for(std::chrono::microseconds(1));
-        } else if (idle_count > 100) {
-          // Medium idle count: yield CPU
-          std::this_thread::yield();
-        }
-        // Low idle count: busy poll for ultra-low latency
+  auto last_stats_time = std::chrono::steady_clock::now();
+  const auto stats_interval = std::chrono::seconds(30);  // Report stats every 30 seconds
+  
+  while (true) {
+    {
+      absl::MutexLock lock(&mutex_);
+      if (!initialized_ || !progress_task_running_) {
+        break;
       }
-    } else {
-      // No worker available, sleep briefly
-      std::this_thread::sleep_for(std::chrono::microseconds(1));
+      
+      // Poll for progress
+      ucp_worker_progress(worker_);
     }
+    
+    // Periodically report buffer pool statistics
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_stats_time >= stats_interval) {
+      auto stats = buffer_pool_.GetStats();
+      ABSL_LOG(INFO) << "AdaptiveBufferPool Stats - Total: " << stats.total_buffers
+                     << ", In Use: " << stats.buffers_in_use
+                     << ", Memory: " << stats.memory_usage_bytes << " bytes"
+                     << ", Small: " << stats.small_buffers
+                     << ", Medium: " << stats.medium_buffers
+                     << ", Large: " << stats.large_buffers;
+      
+      // Clean up old unused buffers
+      buffer_pool_.CleanupOldBuffers();
+      
+      last_stats_time = now;
+    }
+    
+    // Sleep briefly to avoid busy waiting
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
   
   ABSL_LOG(INFO) << "UCX worker progress polling stopped";
@@ -2523,19 +1929,6 @@ void UcxManager::Shutdown() {
     mutex_.Lock();
     progress_thread_.reset();
     ABSL_LOG(INFO) << "Progress thread joined successfully";
-  }
-  
-  // Shutdown worker pool
-  if (worker_pool_initialized_) {
-    ABSL_LOG(INFO) << "Shutting down worker pool with " << client_workers_.size() << " workers";
-    for (auto& worker_context : client_workers_) {
-      if (worker_context) {
-        worker_context->Shutdown();
-      }
-    }
-    client_workers_.clear();
-    worker_pool_initialized_ = false;
-    ABSL_LOG(INFO) << "Worker pool shutdown complete";
   }
   
   // Cancel all pending receive operations
@@ -2577,19 +1970,20 @@ void UcxManager::Shutdown() {
   }
   pending_read_operations_.clear();
   
-  // Process any remaining UCX events before destroying worker
+  // Give UCX some time to process cancellations
   if (worker_) {
-    // Brief processing to clear any pending operations
+    // Process any remaining UCX events
     for (int i = 0; i < 10; ++i) {
       ucp_worker_progress(worker_);
     }
   }
   
+  // Clean up the adaptive buffer pool
+  buffer_pool_.Shutdown();
+  
   // Clean up UCX resources in reverse order of creation
   if (worker_) {
     ABSL_LOG(INFO) << "Destroying UCX worker";
-    // Clear atomic worker handle before destroying
-    worker_atomic_.store(nullptr, std::memory_order_release);
     ucp_worker_destroy(worker_);
     worker_ = nullptr;
   }
@@ -2658,13 +2052,7 @@ class RemoteDramDriver
   }
 
   Future<const void> DeleteRange(KeyRange range) override {
-    if (is_server_mode_) {
-      // Server mode: delete locally
-      return DeleteRangeLocal(range);
-    } else {
-      // Client mode: send to remote server
-      return DeleteRangeRemote(range);
-    }
+    return absl::UnimplementedError("remote_dram driver DeleteRange not yet implemented");
   }
 
   void ListImpl(kvstore::ListOptions options, 
@@ -2680,8 +2068,7 @@ class RemoteDramDriver
   
   // Public members for access from driver spec
   SpecData spec_;
-  ucp_ep_h client_endpoint_ = nullptr;  // UCX endpoint for client mode (legacy)
-  std::string server_addr_;             // Server address for worker pool connections
+  ucp_ep_h client_endpoint_ = nullptr;  // UCX endpoint for client mode
   bool is_server_mode_ = false;
   
  private:
@@ -2699,125 +2086,11 @@ class RemoteDramDriver
     
     return MakeReadyFuture<TimestampedStorageGeneration>(result);
   }
-
-  Future<const void> DeleteRangeLocal(const KeyRange& range) {
-    auto& storage = UcxManager::Instance().GetStorage();
-    
-    if (range.empty()) {
-      return MakeReadyFuture();
-    }
-    
-    // For local delete range, we need to convert KeyRange to prefix
-    // In most cases, we'll treat the range as a prefix deletion
-    std::string prefix = range.inclusive_min;
-    size_t deleted_count = storage.RemoveRange(prefix);
-    
-    ABSL_LOG(INFO) << "DeleteRangeLocal deleted " << deleted_count 
-                   << " keys with prefix '" << prefix << "'";
-    
-    return MakeReadyFuture();
-  }
-
-  Future<const void> DeleteRangeRemote(const KeyRange& range) {
-    if (!client_endpoint_) {
-      ABSL_LOG(ERROR) << "DeleteRangeRemote called but client_endpoint is null";
-      return absl::InternalError("Client endpoint not available");
-    }
-
-    if (range.empty()) {
-      return MakeReadyFuture();
-    }
-
-    auto& ucx_manager = UcxManager::Instance();
-    uint64_t request_id = ucx_manager.GenerateRequestId();
-    
-    // Convert KeyRange to prefix for deletion
-    std::string prefix = range.inclusive_min;
-    
-    ABSL_LOG(INFO) << "DeleteRangeRemote sending delete range request for prefix '" 
-                   << prefix << "'";
-
-    // Create delete range message
-    size_t message_size = sizeof(MessageHeader) + prefix.size();
-    std::vector<char> message_buffer(message_size);
-    
-    // Copy prefix data
-    char* data_ptr = message_buffer.data() + sizeof(MessageHeader);
-    std::memcpy(data_ptr, prefix.data(), prefix.size());
-    
-    // Initialize message header
-    MessageHeader* header = reinterpret_cast<MessageHeader*>(message_buffer.data());
-    message_utils::InitializeMessageHeader(header, MessageType::DELETE_RANGE_REQUEST, 
-                                          static_cast<uint32_t>(prefix.size()),
-                                          0,  // no value for delete range
-                                          request_id, data_ptr);
-
-    // Create promise for the operation
-    auto [promise, future] = PromiseFuturePair<void>::Make();
-    
-    // Register pending operation
-    ucx_manager.RegisterPendingOperation(request_id, std::move(promise), MessageType::DELETE_RANGE_REQUEST);
-    
-    // Post receive buffer for delete range response
-    PostDeleteRangeResponseReceive(request_id);
-    
-    // Send message using UCX
-    ucp_request_param_t send_params;
-    memset(&send_params, 0, sizeof(send_params));
-    send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-    send_params.cb.send = SendCallback;
-    send_params.user_data = reinterpret_cast<void*>(request_id);
-
-    void* send_request = ucp_tag_send_nbx(client_endpoint_, message_buffer.data(), 
-                                         message_size, UCX_TAG_DELETE_RANGE_REQUEST, &send_params);
-
-    if (UCS_PTR_IS_ERR(send_request)) {
-      ucs_status_t status = UCS_PTR_STATUS(send_request);
-      ABSL_LOG(ERROR) << "Failed to send delete range request: " << ucs_status_string(status);
-      return absl::InternalError(absl::StrFormat("UCX send failed: %s", ucs_status_string(status)));
-    } else if (send_request != nullptr) {
-      // Request is in progress
-      ABSL_LOG(INFO) << "Delete range request sent successfully [ID:" << request_id << "]";
-    }
-    
-    return std::move(future);
-  }
   
   Future<TimestampedStorageGeneration> WriteRemote(const kvstore::Key& key, 
                                                    const absl::Cord& value) {
-    auto& ucx_manager = UcxManager::Instance();
-    
-    // PHASE 2: Try to get a worker from the pool for parallel processing
-    ClientWorkerContext* worker_context = ucx_manager.GetWorkerForNewOperation();
-    
-    if (worker_context && worker_context->worker) {
-      // Use multi-worker parallel processing
-      return WriteRemoteWithWorker(key, value, worker_context);
-    } else {
-      // Fallback to legacy single-worker mode
-      ABSL_LOG(WARNING) << "Using legacy single-worker mode for key '" << key << "'";
-      return WriteRemoteLegacy(key, value);
-    }
-  }
-
-  Future<TimestampedStorageGeneration> WriteRemoteWithWorker(const kvstore::Key& key, 
-                                                            const absl::Cord& value,
-                                                            ClientWorkerContext* worker_context) {
-    // PHASE 4: Use zero-copy writes for maximum performance
-    // ABSL_LOG(INFO) << "PHASE4: Using zero-copy write for key '" << key 
-                  //  << "' with " << value.size() << " bytes";
-    
-    // Initialize memory pool on first use
-    UcxMemoryPool::Instance().Initialize();
-    
-    // Use shared client endpoint with zero-copy buffer management
-    return worker_context->WriteZeroCopy(key, value, client_endpoint_);
-  }
-
-  Future<TimestampedStorageGeneration> WriteRemoteLegacy(const kvstore::Key& key, 
-                                                        const absl::Cord& value) {
     if (!client_endpoint_) {
-      ABSL_LOG(ERROR) << "WriteRemoteLegacy called but client_endpoint is null for key '" << key << "'";
+      ABSL_LOG(ERROR) << "WriteRemote called but client_endpoint is null for key '" << key << "'";
       return absl::InternalError("Client endpoint not available");
     }
     
@@ -2999,7 +2272,7 @@ class RemoteDramDriver
     // Log message buffer for debugging
     message_utils::LogMessageBuffer(message_buffer.data(), message_size, "Client sending read request");
     
-    // ABSL_LOG(INFO) << "Sending UCX read request: key='" << key << "', request_id=" << request_id;
+    ABSL_LOG(INFO) << "Sending UCX read request: key='" << key << "', request_id=" << request_id;
     // std::cout << "📤 CLIENT: Sending read request [ID:" << request_id << "] key='" << key << "'" << std::endl;
     
     // Create promise/future pair for read result
@@ -3159,110 +2432,6 @@ class RemoteDramDriver
       delete user_data;
     }
   }
-
-  /// Post a receive buffer to get delete range response from server
-  void PostDeleteRangeResponseReceive(uint64_t request_id) {
-    // Post a receive buffer to get the delete range response from server
-    auto& ucx_manager = UcxManager::Instance();
-    
-    // Allocate buffer for response
-    constexpr size_t max_response_size = 1024;  // Delete range response is small
-    char* recv_buffer = new char[max_response_size];
-    
-    // Create user data structure to hold both request_id and buffer
-    struct DeleteRangeUserData {
-      uint64_t request_id;
-      char* buffer;
-    };
-    DeleteRangeUserData* user_data = new DeleteRangeUserData{request_id, recv_buffer};
-    
-    // Post non-blocking receive for delete range response
-    ucp_request_param_t recv_params;
-    recv_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-    recv_params.cb.recv = ClientDeleteRangeResponseCallback;
-    recv_params.user_data = user_data;
-    
-    ucp_tag_t tag = UCX_TAG_DELETE_RANGE_RESPONSE;  // Use distinct tag for delete range responses
-    ucp_tag_t tag_mask = UCX_TAG_MASK;  // Match tag group
-    
-    void* request = ucp_tag_recv_nbx(ucx_manager.GetWorker(), recv_buffer, max_response_size, 
-                                     tag, tag_mask, &recv_params);
-    
-    if (UCS_PTR_IS_ERR(request)) {
-      ABSL_LOG(ERROR) << "Failed to post client delete range response receive for request_id=" << request_id 
-                      << ": " << ucs_status_string(UCS_PTR_STATUS(request));
-      delete[] recv_buffer;
-      delete user_data;
-      
-      // Complete the operation with error
-      ucx_manager.CompletePendingOperation(request_id, 
-          absl::InternalError("Failed to post delete range response receive"));
-    } else if (request != nullptr) {
-      // Request is in progress, will complete asynchronously
-      ABSL_LOG(INFO) << "Posted client delete range response receive buffer for request_id=" << request_id;
-    } else {
-      // Receive completed immediately (unlikely for delete range responses)
-      ABSL_LOG(INFO) << "Client delete range response receive completed immediately for request_id=" << request_id;
-      delete[] recv_buffer;
-      delete user_data;
-    }
-  }
-  
-  /// Post a receive buffer to get write response from server using worker-specific UCX context
-  void PostWorkerWriteResponseReceive(ClientWorkerContext* worker_context, uint64_t request_id) {
-    if (!worker_context || !worker_context->worker) {
-      ABSL_LOG(ERROR) << "Invalid worker context for PostWorkerWriteResponseReceive";
-      return;
-    }
-    
-    // Allocate buffer for response
-    constexpr size_t max_response_size = 1024;  // Write response is small
-    char* recv_buffer = new char[max_response_size];
-    
-    // Create user data structure to hold request_id, buffer, and worker_context
-    struct WorkerWriteUserData {
-      uint64_t request_id;
-      char* buffer;
-      ClientWorkerContext* worker_context;
-    };
-    WorkerWriteUserData* user_data = new WorkerWriteUserData{request_id, recv_buffer, worker_context};
-    
-    // Post non-blocking receive for write response using worker's UCX context
-    ucp_request_param_t recv_params;
-    recv_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-    recv_params.cb.recv = ClientWorkerWriteResponseCallback;  // Need worker-specific callback
-    recv_params.user_data = user_data;
-    
-    ucp_tag_t tag = UCX_TAG_WRITE_RESPONSE;  // Use distinct tag for write responses
-    ucp_tag_t tag_mask = UCX_TAG_MASK;  // Match tag group
-    
-    // FIX: Use the shared worker that handles the client endpoint connection
-    // The server sends responses back through the original connection endpoint
-    auto& ucx_manager = UcxManager::Instance();
-    ucp_worker_h shared_worker = ucx_manager.GetWorker();  // Use the main worker that handles client_endpoint_
-    void* request = ucp_tag_recv_nbx(shared_worker, recv_buffer, max_response_size, 
-                                     tag, tag_mask, &recv_params);
-    
-    if (UCS_PTR_IS_ERR(request)) {
-      ABSL_LOG(ERROR) << "Failed to post worker write response receive for request_id=" << request_id 
-                      << ": " << ucs_status_string(UCS_PTR_STATUS(request));
-      delete[] recv_buffer;
-      delete user_data;
-      
-      // Complete the operation with error
-      worker_context->CompletePendingWriteOperation(request_id, 
-          absl::InternalError("Failed to post worker write response receive"));
-    } else if (request != nullptr) {
-      // Request is in progress, will complete asynchronously
-      ABSL_LOG(INFO) << "Posted worker write response receive buffer for request_id=" << request_id;
-    } else {
-      // Receive completed immediately (unlikely for write responses)
-      ABSL_LOG(INFO) << "Worker write response receive completed immediately for request_id=" << request_id;
-      delete[] recv_buffer;
-      delete user_data;
-    }
-  }
-  
 };
 
 Future<kvstore::DriverPtr> RemoteDramDriverSpec::DoOpen() const {
@@ -3310,18 +2479,7 @@ Future<kvstore::DriverPtr> RemoteDramDriverSpec::DoOpen() const {
     }
     
     driver->client_endpoint_ = *endpoint_result;
-    driver->server_addr_ = *data_.remote_addr;  // Store server address for worker pool
     driver->is_server_mode_ = false;
-    
-    // PHASE 2: Initialize worker pool for parallel processing
-    auto worker_pool_status = ucx_manager.InitializeWorkerPool(4);  // 4 workers default
-    if (!worker_pool_status.ok()) {
-      ABSL_LOG(WARNING) << "Failed to initialize worker pool: " << worker_pool_status
-                        << ". Falling back to single-worker mode.";
-    } else {
-      ABSL_LOG(INFO) << "Multi-worker pool initialized for parallel processing";
-    }
-    
     ABSL_LOG(INFO) << "UCX client initialized successfully, connected to " << *data_.remote_addr;
   }
   
@@ -3334,12 +2492,6 @@ Result<kvstore::Spec> ParseRemoteDramUrl(std::string_view url) {
 }
 
 }  // namespace
-
-/// Fire-and-forget send callback for Phase 3 operations
-void FireAndForgetSendCallback(void* request, ucs_status_t status, void* user_data) {
-  FireAndForgetSendCallbackImpl(request, status, user_data);
-}
-
 }  // namespace tensorstore
 
 TENSORSTORE_DECLARE_GARBAGE_COLLECTION_NOT_REQUIRED(

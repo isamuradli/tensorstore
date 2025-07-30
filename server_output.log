@@ -1,0 +1,148 @@
+WARNING: The following configs were expanded more than once: [gcc_or_clang]. For repeatable flags, repeats are counted twice and may lead to unexpected behavior.
+Computing main repo mapping: 
+WARNING: The following configs were expanded more than once: [gcc_or_clang]. For repeatable flags, repeats are counted twice and may lead to unexpected behavior.
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //examples/two_nodes:node2_server (0 packages loaded, 0 targets configured)
+Analyzing: target //examples/two_nodes:node2_server (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed target //examples/two_nodes:node2_server (0 packages loaded, 0 targets configured).
+INFO: Found 1 target...
+Target //examples/two_nodes:node2_server up-to-date:
+  bazel-bin/examples/two_nodes/node2_server
+INFO: Elapsed time: 0.221s, Critical Path: 0.00s
+INFO: 1 process: 1 internal.
+INFO: Build completed successfully, 1 total action
+INFO: Running command line: bazel-bin/examples/two_nodes/node2_server 0.0.0.0:12345
+=== Node 2 Server ===
+Starting remote_dram server on: 0.0.0.0:12345
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1753902282.701984  392430 remote_dram_kvstore.cc:1299] UCX Manager initialized successfully with socket support
+I0000 00:00:1753902282.702221  392430 remote_dram_kvstore.cc:1085] AdaptiveBufferPool initialized with 60 buffers
+I0000 00:00:1753902282.702321  392430 remote_dram_kvstore.cc:1864] UCX worker progress task started with enhanced thread management
+I0000 00:00:1753902282.702329  392430 remote_dram_kvstore.cc:2461] Initializing UCX for server mode on 0.0.0.0:12345
+I0000 00:00:1753902282.702335  392430 remote_dram_kvstore.cc:1318] Creating UCX listener for address: 0.0.0.0:12345
+I0000 00:00:1753902282.702343  392430 remote_dram_kvstore.cc:1352] Binding to all interfaces (INADDR_ANY) on port 12345
+I0000 00:00:1753902282.702354  392430 remote_dram_kvstore.cc:1371] Attempting to create UCX listener with parameters configured
+I0000 00:00:1753902282.702347  392800 remote_dram_kvstore.cc:1868] UCX worker progress polling started
+I0000 00:00:1753902282.702410  392430 remote_dram_kvstore.cc:1404] UCX listener created successfully on 0.0.0.0:12345
+I0000 00:00:1753902282.702574  392430 remote_dram_kvstore.cc:1411] Posting 100 initial adaptive receive buffers
+I0000 00:00:1753902282.702583  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703128  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703141  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703146  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703151  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703167  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703174  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703181  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703186  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703192  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703197  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703202  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703207  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703214  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703219  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703224  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703243  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703248  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703252  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703256  392430 remote_dram_kvstore.cc:1104] AdaptiveBufferPool: Reused buffer of size 20480
+I0000 00:00:1753902282.703263  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703284  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703294  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703307  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703317  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703326  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703338  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703354  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703366  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703377  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703391  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703401  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703410  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703420  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703430  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703440  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703454  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703466  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703476  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703485  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703495  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703505  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703514  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703524  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703535  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703544  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703565  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703574  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703583  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703593  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703606  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703617  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703626  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703636  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703645  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703655  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703668  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703678  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703690  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703704  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703736  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703747  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703757  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703766  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703776  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703790  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703799  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703809  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703818  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703828  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703837  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703847  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703858  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703867  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703878  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703892  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703903  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703914  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703924  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703934  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703944  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703953  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703963  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703972  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.703989  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704000  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704010  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704019  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704029  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704038  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704050  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704061  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704076  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704089  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704100  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704110  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704119  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704129  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704139  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704148  392430 remote_dram_kvstore.cc:1117] AdaptiveBufferPool: Created new buffer of size 20480
+I0000 00:00:1753902282.704160  392430 remote_dram_kvstore.cc:2470] UCX server initialized successfully, listening on 0.0.0.0:12345
+✓ Remote DRAM server started successfully!
+✓ Server is ready to receive tensor data from Node 1
+✓ Data will be stored in this node's DRAM memory
+
+Server is running and waiting for connections...
+All tensor data received from Node 1 will be stored locally
+Press Ctrl+C to stop the server
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+I0000 00:00:1753902312.702561  392800 remote_dram_kvstore.cc:1888] AdaptiveBufferPool Stats - Total: 140, In Use: 100, Memory: 3461120 bytes, Small: 20, Medium: 100, Large: 20
+I0000 00:00:1753902312.702676  392800 remote_dram_kvstore.cc:1178] AdaptiveBufferPool: Cleaned up 40 old buffers
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+I0000 00:00:1753902342.702613  392800 remote_dram_kvstore.cc:1888] AdaptiveBufferPool Stats - Total: 100, In Use: 100, Memory: 2048000 bytes, Small: 0, Medium: 100, Large: 0
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...

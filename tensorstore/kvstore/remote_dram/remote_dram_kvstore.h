@@ -23,6 +23,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <chrono>
+#include <thread>
 
 #include "tensorstore/internal/json_binding/json_binding.h"
 #include "tensorstore/kvstore/driver.h"
@@ -47,8 +49,6 @@ constexpr ucp_tag_t UCX_TAG_WRITE_REQUEST = 0x1000;
 constexpr ucp_tag_t UCX_TAG_WRITE_RESPONSE = 0x1001;
 constexpr ucp_tag_t UCX_TAG_READ_REQUEST = 0x2000;
 constexpr ucp_tag_t UCX_TAG_READ_RESPONSE = 0x2001;
-constexpr ucp_tag_t UCX_TAG_DELETE_RANGE_REQUEST = 0x3000;
-constexpr ucp_tag_t UCX_TAG_DELETE_RANGE_RESPONSE = 0x3001;
 constexpr ucp_tag_t UCX_TAG_MASK = 0xF000;
 
 /// Message types for client-server communication
@@ -57,8 +57,6 @@ enum class MessageType : uint32_t {
   WRITE_RESPONSE = 2,
   READ_REQUEST = 3,
   READ_RESPONSE = 4,
-  DELETE_RANGE_REQUEST = 5,
-  DELETE_RANGE_RESPONSE = 6,
 };
 
 /// Header for all messages
@@ -95,20 +93,6 @@ struct ReadResponse {
   MessageHeader header;
   uint32_t status_code;  // 0 = success, 1 = key not found, 2 = error
   // Followed by value_length bytes of value data (if status_code == 0)
-} __attribute__((packed));
-
-/// Delete range request message structure
-struct DeleteRangeRequest {
-  MessageHeader header;
-  // Followed by key_length bytes of key prefix data
-  // key_length contains the prefix for range deletion
-} __attribute__((packed));
-
-/// Delete range response message structure
-struct DeleteRangeResponse {
-  MessageHeader header;
-  uint32_t status_code;  // 0 = success, non-zero = error
-  uint32_t deleted_count;  // Number of keys deleted
 } __attribute__((packed));
 
 /// Data members for `RemoteDramDriverSpec`.
@@ -151,6 +135,68 @@ struct PendingReadOperation {
     : request_id(id), promise(std::move(p)) {}
 };
 
+/// Adaptive buffer management for UCX receive operations
+class AdaptiveBufferPool {
+ public:
+  /// Buffer size categories for efficient memory usage
+  static constexpr size_t kSmallBufferSize = 1024;      // 1KB for headers/small messages
+  static constexpr size_t kMediumBufferSize = 20480;    // 20KB for typical payloads (16KB + header overhead)
+  static constexpr size_t kLargeBufferSize = 69632;     // 68KB for large transfers (64KB + header overhead)
+  static constexpr size_t kMaxBuffers = 500;            // Increased maximum total buffers
+  static constexpr size_t kInitialBuffers = 20;         // Increased initial buffer count per size
+  
+  struct BufferInfo {
+    char* data;
+    size_t size;
+    std::chrono::steady_clock::time_point allocated_time;
+    bool in_use;
+    
+    BufferInfo(size_t buffer_size) 
+      : data(new char[buffer_size]), size(buffer_size), 
+        allocated_time(std::chrono::steady_clock::now()), in_use(false) {}
+    
+    ~BufferInfo() { delete[] data; }
+  };
+  
+  /// Initialize buffer pool with initial allocations
+  void Initialize();
+  
+  /// Get an appropriate buffer for the given size requirement
+  char* AcquireBuffer(size_t required_size, size_t* actual_size);
+  
+  /// Return a buffer to the pool for reuse
+  void ReleaseBuffer(char* buffer);
+  
+  /// Clean up unused buffers older than threshold
+  void CleanupOldBuffers(std::chrono::seconds max_age = std::chrono::seconds(30));
+  
+  /// Get buffer pool statistics
+  struct Stats {
+    size_t total_buffers;
+    size_t buffers_in_use;
+    size_t small_buffers;
+    size_t medium_buffers;
+    size_t large_buffers;
+    size_t memory_usage_bytes;
+  };
+  Stats GetStats() const;
+  
+  /// Shutdown and cleanup all buffers
+  void Shutdown();
+  
+ private:
+  mutable absl::Mutex mutex_;
+  std::vector<std::unique_ptr<BufferInfo>> buffer_pool_ ABSL_GUARDED_BY(mutex_);
+  std::unordered_map<char*, size_t> buffer_lookup_ ABSL_GUARDED_BY(mutex_);
+  bool initialized_ ABSL_GUARDED_BY(mutex_) = false;
+  
+  /// Find best fit buffer size
+  size_t SelectBufferSize(size_t required_size) const;
+  
+  /// Create new buffer of specified size
+  std::unique_ptr<BufferInfo> CreateBuffer(size_t size);
+};
+
 /// Server-side storage for key-value pairs
 class RemoteDramStorage {
  public:
@@ -166,9 +212,6 @@ class RemoteDramStorage {
   /// Remove a key
   bool Remove(const std::string& key);
   
-  /// Remove all keys that start with the given prefix
-  size_t RemoveRange(const std::string& prefix);
-  
   /// Get all stored keys (for verification/debugging)
   std::vector<std::string> GetAllKeys() const;
   
@@ -178,74 +221,6 @@ class RemoteDramStorage {
  private:
   mutable absl::Mutex mutex_;
   std::unordered_map<std::string, absl::Cord> storage_ ABSL_GUARDED_BY(mutex_);
-};
-
-/// Forward declarations for multi-worker support
-struct PendingOperation;
-struct PendingWriteOperation;
-struct PendingReadOperation;
-
-/// Client worker context for parallel UCX operations
-struct ClientWorkerContext {
-  ucp_worker_h worker = nullptr;
-  ucp_ep_h endpoint = nullptr;
-  std::unique_ptr<std::thread> progress_thread;
-  std::atomic<bool> active{true};
-  
-  // Per-worker operation tracking (lock-free request ID generation)
-  // NOTE: Use globally unique request IDs to avoid confusion across workers
-  std::atomic<uint64_t> next_request_id{1};
-  
-  // PHASE 3: Flow control for fire-and-forget operations
-  std::atomic<size_t> outstanding_operations_{0};
-  static constexpr size_t MAX_OUTSTANDING = 64;  // Sliding window size
-  
-  // Per-worker pending operations (minimal locking scope)
-  absl::Mutex pending_ops_mutex;
-  std::unordered_map<uint64_t, std::unique_ptr<PendingWriteOperation>> pending_write_operations ABSL_GUARDED_BY(pending_ops_mutex);
-  std::unordered_map<uint64_t, std::unique_ptr<PendingReadOperation>> pending_read_operations ABSL_GUARDED_BY(pending_ops_mutex);
-  
-  // Lock-free request ID generation with worker instance prefix for global uniqueness
-  uint64_t GenerateRequestId() {
-    // Generate unique request ID by combining instance pointer and sequence
-    // This ensures globally unique IDs across all worker contexts
-    uint64_t instance_id = reinterpret_cast<uintptr_t>(this) & 0xFF;  // Lower 8 bits of pointer
-    uint64_t sequence = next_request_id.fetch_add(1, std::memory_order_relaxed);
-    return (instance_id << 56) | (sequence & 0x00FFFFFFFFFFFFFF);
-  }
-  
-  // Per-worker operation management
-  void RegisterPendingWriteOperation(uint64_t request_id, Promise<void> promise);
-  void RegisterPendingReadOperation(uint64_t request_id, Promise<kvstore::ReadResult> promise);
-  void CompletePendingWriteOperation(uint64_t request_id, absl::Status status);
-  void CompletePendingReadOperation(uint64_t request_id, kvstore::ReadResult result);
-  
-  // Worker progress polling
-  void WorkerProgressTask();
-  
-  // PHASE 3: Fire-and-forget write operations
-  Future<TimestampedStorageGeneration> WriteFireAndForget(
-      const kvstore::Key& key, const absl::Cord& value, ucp_ep_h endpoint);
-  
-  // PHASE 4: Zero-copy fire-and-forget write operations
-  Future<TimestampedStorageGeneration> WriteZeroCopy(
-      const kvstore::Key& key, const absl::Cord& value, ucp_ep_h endpoint);
-  
-  // PHASE 3: Flow control helpers
-  bool CanSendOperation() const {
-    return outstanding_operations_.load(std::memory_order_acquire) < MAX_OUTSTANDING;
-  }
-  
-  void IncrementOutstanding() {
-    outstanding_operations_.fetch_add(1, std::memory_order_relaxed);
-  }
-  
-  void DecrementOutstanding() {
-    outstanding_operations_.fetch_sub(1, std::memory_order_relaxed);
-  }
-  
-  // Cleanup
-  void Shutdown();
 };
 
 /// Singleton UCX Manager to handle global UCX state and worker polling
@@ -284,25 +259,23 @@ class UcxManager {
   /// Complete a pending read operation
   void CompletePendingReadOperation(uint64_t request_id, kvstore::ReadResult result);
   
-  /// Generate next request ID (deprecated - use worker context)
+  /// Generate next request ID
   uint64_t GenerateRequestId();
-  
-  /// Multi-worker operations for parallel processing
-  /// Get a worker context for new operations (round-robin load balancing)
-  ClientWorkerContext* GetWorkerForNewOperation();
-  
-  /// Initialize worker pool for client operations
-  absl::Status InitializeWorkerPool(size_t num_workers = 4);
-  
-  /// Select worker for specific key (for key-based sharding if needed)
-  ClientWorkerContext* SelectWorkerForKey(const kvstore::Key& key);
   
   /// Post a receive buffer for server-side message handling
   void PostServerReceive();
   
   /// Post receive buffer without acquiring mutex (for use within locked context)
   void PostServerReceiveNoLock();
-  void PostSingleServerReceiveNoLock(ucp_tag_t target_tag);
+  
+  /// Post adaptive receive buffer with optimal sizing
+  void PostAdaptiveServerReceive();
+  
+  /// Post adaptive receive buffer without acquiring mutex (for use within locked context)
+  void PostAdaptiveServerReceiveNoLock();
+  
+  /// Get the adaptive buffer pool
+  AdaptiveBufferPool& GetBufferPool() { return buffer_pool_; }
   
   /// Send a read response from server to client
   void SendReadResponse(ucp_ep_h client_endpoint, uint64_t request_id, 
@@ -311,10 +284,6 @@ class UcxManager {
   /// Send a write response from server to client
   void SendWriteResponse(ucp_ep_h client_endpoint, uint64_t request_id, 
                          uint32_t status_code);
-  
-  /// Send a delete range response from server to client
-  void SendDeleteRangeResponse(ucp_ep_h client_endpoint, uint64_t request_id, 
-                               uint32_t status_code, uint32_t deleted_count);
   
   /// Register a client endpoint (for server mode)
   void RegisterClientEndpoint(ucp_ep_h client_endpoint);
@@ -365,21 +334,19 @@ class UcxManager {
   
   // ENHANCED: Use atomic bool for thread-safe progress task state
   std::atomic<bool> progress_task_running_{false};
-  // ENHANCED: Atomic worker handle for lock-free progress polling
-  std::atomic<ucp_worker_h> worker_atomic_{nullptr};
   // ENHANCED: Use managed thread for proper cleanup
   std::unique_ptr<std::thread> progress_thread_ ABSL_GUARDED_BY(mutex_);
   
   /// Server-side storage
   RemoteDramStorage storage_;
   
-  /// Multi-worker architecture for parallel operations
-  std::vector<std::unique_ptr<ClientWorkerContext>> client_workers_;
-  std::atomic<size_t> next_worker_index_{0};
-  bool worker_pool_initialized_ ABSL_GUARDED_BY(mutex_) = false;
+  /// Adaptive buffer pool for efficient memory management
+  AdaptiveBufferPool buffer_pool_;
   
-  /// Legacy single-worker pending operations (deprecated)
+  /// Pending write operations for client mode
   std::unordered_map<uint64_t, std::unique_ptr<PendingWriteOperation>> pending_write_operations_ ABSL_GUARDED_BY(mutex_);
+  
+  /// Pending read operations for client mode
   std::unordered_map<uint64_t, std::unique_ptr<PendingReadOperation>> pending_read_operations_ ABSL_GUARDED_BY(mutex_);
   
   /// Track active UCX requests for proper cleanup
@@ -402,15 +369,6 @@ void NotifyServerOfNewData(const kvstore::Key& key, const absl::Cord& value);
 
 /// Client-side callback for handling write responses
 void ClientWriteResponseCallback(void* request, ucs_status_t status, const ucp_tag_recv_info_t* info, void* user_data);
-
-/// Client-side callback for handling delete range responses
-void ClientDeleteRangeResponseCallback(void* request, ucs_status_t status, const ucp_tag_recv_info_t* info, void* user_data);
-
-/// Client-side callback for handling write responses from worker contexts
-void ClientWorkerWriteResponseCallback(void* request, ucs_status_t status, const ucp_tag_recv_info_t* info, void* user_data);
-
-/// Fire-and-forget send callback for Phase 3 operations
-void FireAndForgetSendCallback(void* request, ucs_status_t status, void* user_data);
 
 /// Utility functions for message integrity
 namespace message_utils {
