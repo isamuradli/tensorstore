@@ -9,7 +9,11 @@ licenses(["notice"])
 tensorstore_cc_library(
     name = "remote_dram",
     srcs = ["remote_dram_kvstore.cc"],
-    hdrs = ["remote_dram_kvstore.h"],
+    hdrs = [
+        "remote_dram_kvstore.h",
+        "ucx_memory_pool.h",
+        "zero_copy_builder.h",
+    ],
     deps = [
         "//tensorstore/internal:intrusive_ptr",
         "//tensorstore/internal:uri_utils",
