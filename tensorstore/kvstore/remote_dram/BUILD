@@ -100,4 +100,25 @@ tensorstore_cc_binary(
         "@abseil-cpp//absl/strings:cord",
         "@nlohmann_json//:json",
     ],
+)
+
+# Phase 3: Regression Test Suite
+tensorstore_cc_library(
+    name = "phase3_regression_test",
+    srcs = ["phase3_regression_test.cc"],
+    hdrs = ["phase3_regression_test.h"],
+    deps = [
+        ":remote_dram",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "phase3_test_runner",
+    srcs = ["phase3_test_runner.cc"],
+    deps = [
+        ":phase3_regression_test",
+        "@abseil-cpp//absl/log:absl_log",
+    ],
 ) 

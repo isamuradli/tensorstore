@@ -41,6 +41,10 @@ bazel run -c opt \
 # Quick size reference:
 
 16KB   --chunk_size=16384
+32KB   --chunk_size=32768
+64KB   --chunk_size=65536
+128KB  --chunk_size=131072
+256KB  --chunk_size=262144
 512KB  --chunk_size=524288
 1MB    --chunk_size=1048576
 2MB    --chunk_size=2097152  (default)

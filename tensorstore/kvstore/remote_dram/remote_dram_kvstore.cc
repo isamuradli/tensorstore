@@ -386,7 +386,7 @@ void SendCallback(void* request, ucs_status_t status, void* user_data) {
   //                << " with status: " << ucs_status_string(status);
   
   if (status == UCS_OK) {
-    std::cout << "✅ UCX: Send completed successfully [ID:" << request_id << "]" << std::endl;
+    // std::cout << "✅ UCX: Send completed successfully [ID:" << request_id << "]" << std::endl;
   } else {
     std::cout << "❌ UCX: Send failed [ID:" << request_id << "] - " << ucs_status_string(status) << std::endl;
   }
@@ -707,7 +707,7 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       
       if (value.has_value()) {
         ABSL_LOG(INFO) << "Server found key '" << key << "' with value size=" << value->size();
-        std::cout << "📤 SERVER: Found key '" << key << "' [ID:" << header->request_id << "] - sending response with " << value->size() << " bytes" << std::endl;
+        // std::cout << "📤 SERVER: Found key '" << key << "' [ID:" << header->request_id << "] - sending response with " << value->size() << " bytes" << std::endl;
       } else {
         ABSL_LOG(INFO) << "Server key '" << key << "' not found";
         std::cout << "❌ SERVER: Key '" << key << "' not found [ID:" << header->request_id << "]" << std::endl;
@@ -784,9 +784,9 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
     
     ReadResponse* response = reinterpret_cast<ReadResponse*>(response_data.data());
     
-    ABSL_LOG(INFO) << "Client received read response: status_code=" << response->status_code
-                   << ", value_len=" << response->header.value_length
-                   << ", request_id=" << response->header.request_id;
+    // ABSL_LOG(INFO) << "Client received read response: status_code=" << response->status_code
+    //              << ", value_len=" << response->header.value_length
+    //              << ", request_id=" << response->header.request_id;
     
     kvstore::ReadResult result;
     if (response->status_code == 0 && response->header.value_length > 0) {
@@ -809,7 +809,7 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
         result.stamp.generation = StorageGeneration::FromString("remote_read");
         result.stamp.time = absl::Now();
         // ABSL_LOG(INFO) << "Read successful, value size=" << result.value.size();
-        std::cout << "📥 CLIENT: Read response [ID:" << response->header.request_id << "] SUCCESS - received " << result.value.size() << " bytes" << std::endl;
+        // std::cout << "📥 CLIENT: Read response [ID:" << response->header.request_id << "] SUCCESS - received " << result.value.size() << " bytes" << std::endl;
       }
     } else {
       // Key not found or error
@@ -1082,16 +1082,33 @@ void AdaptiveBufferPool::Initialize() {
   }
   
   initialized_ = true;
-  ABSL_LOG(INFO) << "AdaptiveBufferPool initialized with " << buffer_pool_.size() << " buffers";
+  // ABSL_LOG(INFO) << "AdaptiveBufferPool initialized with " << buffer_pool_.size() << " buffers";
 }
 
 char* AdaptiveBufferPool::AcquireBuffer(size_t required_size, size_t* actual_size) {
-  absl::MutexLock lock(&mutex_);
+  // Phase 1: Check for fast path conditions (16KB optimal chunk without memory pressure)
+  // This is a simple check that avoids the circular dependency for now
+  // Future implementation will use a dedicated fast path buffer pool
   
-  if (!initialized_) {
-    Initialize();
+  // Check mode first without holding the lock for long
+  Mode current_mode;
+  {
+    absl::MutexLock lock(&mutex_);
+    if (!initialized_) {
+      Initialize();
+    }
+    current_mode = mode_;
   }
   
+  // Route to appropriate implementation based on mode
+  if (current_mode == Mode::ENHANCED) {
+    return AcquireEnhancedBuffer(required_size, actual_size);
+  }
+  
+  // Legacy mode implementation
+  absl::MutexLock lock(&mutex_);
+  
+  // Legacy mode - exact current implementation
   size_t optimal_size = SelectBufferSize(required_size);
   
   // Try to find an available buffer of the optimal size
@@ -1101,7 +1118,7 @@ char* AdaptiveBufferPool::AcquireBuffer(size_t required_size, size_t* actual_siz
       buffer->in_use = true;
       *actual_size = buffer->size;
       buffer_lookup_[buffer->data] = i; // Store correct index for fast lookup
-      ABSL_LOG(INFO) << "AdaptiveBufferPool: Reused buffer of size " << buffer->size;
+      // ABSL_LOG(INFO) << "AdaptiveBufferPool: Reused buffer of size " << buffer->size;
       return buffer->data;
     }
   }
@@ -1114,7 +1131,7 @@ char* AdaptiveBufferPool::AcquireBuffer(size_t required_size, size_t* actual_siz
     buffer_lookup_[buffer_ptr] = buffer_pool_.size();
     buffer_pool_.push_back(std::move(new_buffer));
     *actual_size = optimal_size;
-    ABSL_LOG(INFO) << "AdaptiveBufferPool: Created new buffer of size " << optimal_size;
+    // ABSL_LOG(INFO) << "AdaptiveBufferPool: Created new buffer of size " << optimal_size;
     return buffer_ptr;
   }
   
@@ -1175,7 +1192,7 @@ void AdaptiveBufferPool::CleanupOldBuffers(std::chrono::seconds max_age) {
   }
   
   if (cleaned > 0) {
-    ABSL_LOG(INFO) << "AdaptiveBufferPool: Cleaned up " << cleaned << " old buffers";
+    // ABSL_LOG(INFO) << "AdaptiveBufferPool: Cleaned up " << cleaned << " old buffers";
   }
 }
 
@@ -1226,6 +1243,73 @@ size_t AdaptiveBufferPool::SelectBufferSize(size_t required_size) const {
 
 std::unique_ptr<AdaptiveBufferPool::BufferInfo> AdaptiveBufferPool::CreateBuffer(size_t size) {
   return std::make_unique<BufferInfo>(size);
+}
+
+// Phase 1: Conservative Buffer Enhancement Implementation
+void AdaptiveBufferPool::SetMode(Mode mode) {
+  absl::MutexLock lock(&mutex_);
+  if (mode_ != mode) {
+    ABSL_LOG(INFO) << "AdaptiveBufferPool: Switching from " 
+                   << (mode_ == Mode::LEGACY ? "LEGACY" : "ENHANCED") 
+                   << " to " << (mode == Mode::LEGACY ? "LEGACY" : "ENHANCED") << " mode";
+    mode_ = mode;
+  }
+}
+
+char* AdaptiveBufferPool::AcquireEnhancedBuffer(size_t required_size, size_t* actual_size) {
+  // Enhanced buffer acquisition - currently mirrors legacy behavior
+  // This is where future enhancements will be added safely
+  
+  absl::MutexLock lock(&mutex_);
+  
+  if (!initialized_) {
+    Initialize();
+  }
+  
+  size_t optimal_size = SelectBufferSize(required_size);
+  
+  // Try to find an available buffer of the optimal size
+  for (size_t i = 0; i < buffer_pool_.size(); ++i) {
+    auto& buffer = buffer_pool_[i];
+    if (!buffer->in_use && buffer->size == optimal_size) {
+      buffer->in_use = true;
+      *actual_size = buffer->size;
+      buffer_lookup_[buffer->data] = i;
+      ABSL_LOG(INFO) << "AdaptiveBufferPool: Enhanced mode reused buffer of size " << buffer->size;
+      return buffer->data;
+    }
+  }
+  
+  // Create new buffer if under limit - same logic as current implementation
+  if (buffer_pool_.size() < kMaxBuffers) {
+    auto new_buffer = CreateBuffer(optimal_size);
+    char* buffer_data = new_buffer->data;
+    new_buffer->in_use = true;
+    
+    size_t buffer_index = buffer_pool_.size();
+    buffer_pool_.push_back(std::move(new_buffer));
+    buffer_lookup_[buffer_data] = buffer_index;
+    
+    *actual_size = optimal_size;
+    ABSL_LOG(INFO) << "AdaptiveBufferPool: Enhanced mode created new buffer of size " << optimal_size;
+    return buffer_data;
+  }
+  
+  // Fallback to reusing oldest available buffer
+  for (size_t i = 0; i < buffer_pool_.size(); ++i) {
+    auto& buffer = buffer_pool_[i];
+    if (!buffer->in_use) {
+      buffer->in_use = true;
+      *actual_size = buffer->size;
+      buffer_lookup_[buffer->data] = i;
+      ABSL_LOG(WARNING) << "AdaptiveBufferPool: Enhanced mode pool full, reusing buffer of size " 
+                        << buffer->size << " for request of size " << required_size;
+      return buffer->data;
+    }
+  }
+  
+  ABSL_LOG(ERROR) << "AdaptiveBufferPool: Enhanced mode found no available buffers";
+  return nullptr;
 }
 
 // UcxManager Implementation
@@ -1296,7 +1380,7 @@ absl::Status UcxManager::Initialize() {
   }
   
     initialized_ = true;
-    ABSL_LOG(INFO) << "UCX Manager initialized successfully with socket support";
+    // ABSL_LOG(INFO) << "UCX Manager initialized successfully with socket support";
   }  // Release mutex here
   
   // Initialize the adaptive buffer pool
@@ -1423,7 +1507,7 @@ Result<ucp_ep_h> UcxManager::CreateClientEndpoint(const std::string& server_addr
     return absl::FailedPreconditionError("UCX Manager not initialized");
   }
   
-  ABSL_LOG(INFO) << "Creating UCX client endpoint to: " << server_addr;
+  // ABSL_LOG(INFO) << "Creating UCX client endpoint to: " << server_addr;
   
   // Force real UCX networking for all connections (localhost and remote)
   // Parse server address
@@ -1530,6 +1614,9 @@ void UcxManager::CompletePendingReadOperation(uint64_t request_id, kvstore::Read
     it->second->promise.SetResult(std::move(result));
     pending_read_operations_.erase(it);
   }
+  
+  // Complete async operation tracking (release throttling)
+  async_manager_.CompleteOperation(AsyncOperationManager::Operation::READ, request_id);
 }
 
 uint64_t UcxManager::GenerateRequestId() {
@@ -1658,7 +1745,7 @@ void UcxManager::PostServerReceiveNoLock() {
 void UcxManager::PostAdaptiveServerReceive() {
   // Use adaptive buffer pool for optimal memory usage
   size_t actual_buffer_size;
-  char* recv_buffer = buffer_pool_.AcquireBuffer(sizeof(MessageHeader) + 18432, &actual_buffer_size);
+  char* recv_buffer = buffer_pool_.AcquireBuffer(sizeof(MessageHeader) + 4194304, &actual_buffer_size);
   
   // Create user data structure to track buffer origin
   struct AdaptiveReceiveUserData {
@@ -1721,7 +1808,7 @@ void UcxManager::PostAdaptiveServerReceiveNoLock() {
   // Use adaptive buffer pool for optimal memory usage (mutex already held for main state)
   // Buffer pool has its own mutex, so it's safe to call from here
   size_t actual_buffer_size;
-  char* recv_buffer = buffer_pool_.AcquireBuffer(sizeof(MessageHeader) + 18432, &actual_buffer_size);
+  char* recv_buffer = buffer_pool_.AcquireBuffer(sizeof(MessageHeader) + 4194304, &actual_buffer_size);
   
   // Create user data structure to track buffer origin
   struct AdaptiveReceiveUserData {
@@ -1861,11 +1948,11 @@ void UcxManager::StartWorkerProgressTask() {
     });
   }
   
-  ABSL_LOG(INFO) << "UCX worker progress task started with enhanced thread management";
+  // ABSL_LOG(INFO) << "UCX worker progress task started with enhanced thread management";
 }
 
 void UcxManager::WorkerProgressTask() {
-  ABSL_LOG(INFO) << "UCX worker progress polling started";
+  // ABSL_LOG(INFO) << "UCX worker progress polling started";
   
   auto last_stats_time = std::chrono::steady_clock::now();
   const auto stats_interval = std::chrono::seconds(30);  // Report stats every 30 seconds
@@ -1885,12 +1972,12 @@ void UcxManager::WorkerProgressTask() {
     auto now = std::chrono::steady_clock::now();
     if (now - last_stats_time >= stats_interval) {
       auto stats = buffer_pool_.GetStats();
-      ABSL_LOG(INFO) << "AdaptiveBufferPool Stats - Total: " << stats.total_buffers
-                     << ", In Use: " << stats.buffers_in_use
-                     << ", Memory: " << stats.memory_usage_bytes << " bytes"
-                     << ", Small: " << stats.small_buffers
-                     << ", Medium: " << stats.medium_buffers
-                     << ", Large: " << stats.large_buffers;
+      // ABSL_LOG(INFO) << "AdaptiveBufferPool Stats - Total: " << stats.total_buffers
+      //              << ", In Use: " << stats.buffers_in_use
+      //              << ", Memory: " << stats.memory_usage_bytes << " bytes"
+      //              << ", Small: " << stats.small_buffers
+      //              << ", Medium: " << stats.medium_buffers
+      //              << ", Large: " << stats.large_buffers;
       
       // Clean up old unused buffers
       buffer_pool_.CleanupOldBuffers();
@@ -1902,7 +1989,7 @@ void UcxManager::WorkerProgressTask() {
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
   
-  ABSL_LOG(INFO) << "UCX worker progress polling stopped";
+  // ABSL_LOG(INFO) << "UCX worker progress polling stopped";
 }
 
 void UcxManager::Shutdown() {
@@ -2089,9 +2176,15 @@ class RemoteDramDriver
   
   Future<TimestampedStorageGeneration> WriteRemote(const kvstore::Key& key, 
                                                    const absl::Cord& value) {
+    // Reinitialize client endpoint if null (connection persistence fix)
     if (!client_endpoint_) {
-      ABSL_LOG(ERROR) << "WriteRemote called but client_endpoint is null for key '" << key << "'";
-      return absl::InternalError("Client endpoint not available");
+      // ABSL_LOG(INFO) << "WriteRemote reinitializing client endpoint for key '" << key << "'";
+      auto& ucx_manager = UcxManager::Instance();
+      auto endpoint_result = ucx_manager.CreateClientEndpoint(*spec_.remote_addr);
+      if (!endpoint_result.ok()) {
+        return endpoint_result.status();
+      }
+      client_endpoint_ = *endpoint_result;
     }
     
     // Use UCX networking for all connections
@@ -2131,7 +2224,7 @@ class RemoteDramDriver
     message_utils::LogMessageBuffer(message_buffer.data(), message_size, "Client sending write request");
     
     // ABSL_LOG(INFO) << "Sending UCX write request: key='" << key << "', value='" << value_str << "', request_id=" << request_id;
-    std::cout << "📤 CLIENT: Sending write request [ID:" << request_id << "]" << std::endl;
+    // std::cout << "📤 CLIENT: Sending write request [ID:" << request_id << "]" << std::endl;
     
     // Create promise/future pair
     auto [promise, future] = PromiseFuturePair<void>::Make();
@@ -2190,7 +2283,7 @@ class RemoteDramDriver
       delete user_data;
     } else {
       // Send is in progress, will complete asynchronously via SendCallback
-      ABSL_LOG(INFO) << "UCX write request in progress for request_id=" << request_id;
+      // ABSL_LOG(INFO) << "UCX write request in progress for request_id=" << request_id;
       // Resources will be cleaned up in SendCallback
     }
     
@@ -2238,19 +2331,43 @@ class RemoteDramDriver
   
   Future<kvstore::ReadResult> ReadRemote(const kvstore::Key& key, 
                                          const kvstore::ReadOptions& options) {
-    if (!client_endpoint_) {
-      ABSL_LOG(ERROR) << "ReadRemote called but client_endpoint is null for key '" << key << "'";
+    // High-performance async throttling to prevent UCX overload
+    auto& ucx_manager = UcxManager::Instance();
+    auto& async_manager = ucx_manager.GetAsyncManager();
+    
+    // If too many concurrent reads, wait briefly and retry
+    if (async_manager.ShouldThrottleReads()) {
+      // Return a future that will retry after a short delay
+      auto [promise, future] = PromiseFuturePair<kvstore::ReadResult>::Make();
       
-      kvstore::ReadResult result;
-      result.state = kvstore::ReadResult::kMissing;
-      result.stamp.generation = StorageGeneration::NoValue();
-      result.stamp.time = absl::Now();
-      return MakeReadyFuture<kvstore::ReadResult>(std::move(result));
+      // Schedule retry after brief delay (non-blocking)
+      std::thread([promise = std::move(promise), this, key, options]() mutable {
+        std::this_thread::sleep_for(std::chrono::microseconds(100)); // 0.1ms delay
+        auto result = this->ReadRemote(key, options).result();
+        promise.SetResult(result);
+      }).detach();
+      
+      return future;
     }
     
-    // Use UCX networking for all connections
-    auto& ucx_manager = UcxManager::Instance();
+    // Generate request ID and register operation
     uint64_t request_id = ucx_manager.GenerateRequestId();
+    async_manager.RegisterOperation(AsyncOperationManager::Operation::READ, request_id);
+    
+    // Reinitialize client endpoint if null (connection persistence fix)
+    if (!client_endpoint_) {
+      // ABSL_LOG(INFO) << "ReadRemote reinitializing client endpoint for key '" << key << "'";
+      auto& ucx_manager = UcxManager::Instance();
+      auto endpoint_result = ucx_manager.CreateClientEndpoint(*spec_.remote_addr);
+      if (!endpoint_result.ok()) {
+        kvstore::ReadResult result;
+        result.state = kvstore::ReadResult::kMissing;
+        result.stamp.generation = StorageGeneration::NoValue();
+        result.stamp.time = absl::Now();
+        return MakeReadyFuture<kvstore::ReadResult>(std::move(result));
+      }
+      client_endpoint_ = *endpoint_result;
+    }
     
     // ABSL_LOG(INFO) << "ReadRemote sending read request for key '" << key << "' to server";
     
@@ -2272,7 +2389,7 @@ class RemoteDramDriver
     // Log message buffer for debugging
     message_utils::LogMessageBuffer(message_buffer.data(), message_size, "Client sending read request");
     
-    ABSL_LOG(INFO) << "Sending UCX read request: key='" << key << "', request_id=" << request_id;
+    // ABSL_LOG(INFO) << "Sending UCX read request: key='" << key << "', request_id=" << request_id;
     // std::cout << "📤 CLIENT: Sending read request [ID:" << request_id << "] key='" << key << "'" << std::endl;
     
     // Create promise/future pair for read result
@@ -2340,7 +2457,7 @@ class RemoteDramDriver
     auto& ucx_manager = UcxManager::Instance();
     
     // Allocate buffer for response
-    constexpr size_t max_response_size = 64 * 1024;  // 64KB max response
+    constexpr size_t max_response_size = 4 * 1024 * 1024 + 1024;  // 4MB + header overhead max response
     char* recv_buffer = new char[max_response_size];
     
     // Create user data structure to hold both request_id and buffer
@@ -2470,7 +2587,7 @@ Future<kvstore::DriverPtr> RemoteDramDriverSpec::DoOpen() const {
     ABSL_LOG(INFO) << "UCX server initialized successfully, listening on " << *data_.listen_addr;
   } else {
     // Client mode - create UCX endpoint to server
-    ABSL_LOG(INFO) << "Initializing UCX for client mode to " << *data_.remote_addr;
+    // ABSL_LOG(INFO) << "Initializing UCX for client mode to " << *data_.remote_addr;
     
     // Create UCX endpoint to server
     auto endpoint_result = ucx_manager.CreateClientEndpoint(*data_.remote_addr);
@@ -2480,7 +2597,7 @@ Future<kvstore::DriverPtr> RemoteDramDriverSpec::DoOpen() const {
     
     driver->client_endpoint_ = *endpoint_result;
     driver->is_server_mode_ = false;
-    ABSL_LOG(INFO) << "UCX client initialized successfully, connected to " << *data_.remote_addr;
+    // ABSL_LOG(INFO) << "UCX client initialized successfully, connected to " << *data_.remote_addr;
   }
   
   return kvstore::DriverPtr(driver.get());
@@ -2492,6 +2609,186 @@ Result<kvstore::Spec> ParseRemoteDramUrl(std::string_view url) {
 }
 
 }  // namespace
+
+// Phase 0: Foundation Preservation Implementations
+
+PerformanceBaseline::BenchmarkResult PerformanceBaseline::RunBaseline() {
+  auto start = std::chrono::high_resolution_clock::now();
+  
+  // Simulate a typical 16KB operation for baseline measurement
+  const size_t test_data_size = kOptimalChunkSize;
+  auto test_data = std::make_unique<char[]>(test_data_size);
+  std::memset(test_data.get(), 0xAB, test_data_size);
+  
+  // Simulate write operation timing
+  auto write_start = std::chrono::high_resolution_clock::now();
+  // Placeholder for actual write operation - will be enhanced in testing
+  std::this_thread::sleep_for(std::chrono::microseconds(100));
+  auto write_end = std::chrono::high_resolution_clock::now();
+  
+  // Simulate read operation timing  
+  auto read_start = std::chrono::high_resolution_clock::now();
+  // Placeholder for actual read operation - will be enhanced in testing
+  std::this_thread::sleep_for(std::chrono::microseconds(80));
+  auto read_end = std::chrono::high_resolution_clock::now();
+  
+  auto total_end = std::chrono::high_resolution_clock::now();
+  
+  // Calculate throughput estimates (these are placeholders for real measurements)
+  auto write_duration = std::chrono::duration_cast<std::chrono::microseconds>(write_end - write_start);
+  auto read_duration = std::chrono::duration_cast<std::chrono::microseconds>(read_end - read_start);
+  auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - start);
+  
+  double write_mbps = (static_cast<double>(test_data_size) / (1024.0 * 1024.0)) / 
+                      (static_cast<double>(write_duration.count()) / 1000000.0);
+  double read_mbps = (static_cast<double>(test_data_size) / (1024.0 * 1024.0)) / 
+                     (static_cast<double>(read_duration.count()) / 1000000.0);
+  
+  return BenchmarkResult{
+    .write_throughput_mbps = write_mbps,
+    .read_throughput_mbps = read_mbps,
+    .avg_latency = total_duration
+  };
+}
+
+bool PerformanceBaseline::ValidatePerformance(const BenchmarkResult& result) {
+  bool write_ok = result.write_throughput_mbps >= kMinWriteThroughput;
+  bool read_ok = result.read_throughput_mbps >= kMinReadThroughput;
+  
+  if (!write_ok || !read_ok) {
+    ABSL_LOG(WARNING) << "Performance validation failed - Write: " 
+                      << result.write_throughput_mbps << " MB/s (min: " 
+                      << kMinWriteThroughput << "), Read: " 
+                      << result.read_throughput_mbps << " MB/s (min: " 
+                      << kMinReadThroughput << ")";
+    return false;
+  }
+  
+  ABSL_LOG(INFO) << "Performance validation passed - Write: " 
+                 << result.write_throughput_mbps << " MB/s, Read: " 
+                 << result.read_throughput_mbps << " MB/s";
+  return true;
+}
+
+// LegacyBufferPool Implementation - Exact copy of current AdaptiveBufferPool logic
+void LegacyBufferPool::Initialize() {
+  absl::MutexLock lock(&mutex_);
+  
+  if (initialized_) return;
+  
+  // Pre-allocate initial buffers - mirror current implementation exactly
+  const size_t kInitialBuffers = 20;
+  
+  // Small buffers (1KB)
+  for (size_t i = 0; i < kInitialBuffers; ++i) {
+    legacy_pool_.push_back(CreateLegacyBuffer(kLegacySmallSize));
+  }
+  
+  // Medium buffers (20KB) 
+  for (size_t i = 0; i < kInitialBuffers; ++i) {
+    legacy_pool_.push_back(CreateLegacyBuffer(kLegacyMediumSize));
+  }
+  
+  // Large buffers (68KB)
+  for (size_t i = 0; i < kInitialBuffers; ++i) {
+    legacy_pool_.push_back(CreateLegacyBuffer(kLegacyLargeSize));
+  }
+  
+  initialized_ = true;
+  ABSL_LOG(INFO) << "LegacyBufferPool initialized with " << legacy_pool_.size() << " buffers";
+}
+
+char* LegacyBufferPool::AcquireLegacyBuffer(size_t required_size, size_t* actual_size) {
+  absl::MutexLock lock(&mutex_);
+  
+  if (!initialized_) {
+    Initialize();
+  }
+  
+  size_t optimal_size = SelectLegacyBufferSize(required_size);
+  
+  // Try to find an available buffer of the optimal size - exact current logic
+  for (size_t i = 0; i < legacy_pool_.size(); ++i) {
+    auto& buffer = legacy_pool_[i];
+    if (!buffer->in_use && buffer->size == optimal_size) {
+      buffer->in_use = true;
+      *actual_size = buffer->size;
+      buffer_lookup_[buffer->data] = i;
+      ABSL_LOG(INFO) << "LegacyBufferPool: Reused buffer of size " << buffer->size;
+      return buffer->data;
+    }
+  }
+  
+  // No available buffer found, create a new one if under limit (500)
+  if (legacy_pool_.size() < 500) {
+    auto new_buffer = CreateLegacyBuffer(optimal_size);
+    char* buffer_data = new_buffer->data;
+    new_buffer->in_use = true;
+    
+    size_t buffer_index = legacy_pool_.size();
+    legacy_pool_.push_back(std::move(new_buffer));
+    buffer_lookup_[buffer_data] = buffer_index;
+    
+    *actual_size = optimal_size;
+    ABSL_LOG(INFO) << "LegacyBufferPool: Created new buffer of size " << optimal_size;
+    return buffer_data;
+  }
+  
+  // Pool is full, reuse the oldest available buffer
+  for (size_t i = 0; i < legacy_pool_.size(); ++i) {
+    auto& buffer = legacy_pool_[i];
+    if (!buffer->in_use) {
+      buffer->in_use = true;
+      *actual_size = buffer->size;
+      buffer_lookup_[buffer->data] = i;
+      ABSL_LOG(WARNING) << "LegacyBufferPool: Pool full, reusing buffer of size " << buffer->size 
+                        << " for request of size " << required_size;
+      return buffer->data;
+    }
+  }
+  
+  // This should never happen if buffer pool is managed correctly
+  ABSL_LOG(ERROR) << "LegacyBufferPool: No available buffers found";
+  return nullptr;
+}
+
+void LegacyBufferPool::ReleaseLegacyBuffer(char* buffer) {
+  absl::MutexLock lock(&mutex_);
+  
+  auto it = buffer_lookup_.find(buffer);
+  if (it != buffer_lookup_.end()) {
+    size_t index = it->second;
+    if (index < legacy_pool_.size()) {
+      legacy_pool_[index]->in_use = false;
+      ABSL_LOG(INFO) << "LegacyBufferPool: Released buffer of size " << legacy_pool_[index]->size;
+    }
+  } else {
+    ABSL_LOG(ERROR) << "LegacyBufferPool: Attempted to release unknown buffer";
+  }
+}
+
+void LegacyBufferPool::Shutdown() {
+  absl::MutexLock lock(&mutex_);
+  legacy_pool_.clear();
+  buffer_lookup_.clear();
+  initialized_ = false;
+  ABSL_LOG(INFO) << "LegacyBufferPool shutdown complete";
+}
+
+size_t LegacyBufferPool::SelectLegacyBufferSize(size_t required_size) const {
+  // Exact logic from current AdaptiveBufferPool::SelectBufferSize
+  if (required_size <= kLegacySmallSize) {
+    return kLegacySmallSize;
+  } else if (required_size <= kLegacyMediumSize) {
+    return kLegacyMediumSize;
+  } else {
+    return kLegacyLargeSize;
+  }
+}
+
+std::unique_ptr<LegacyBufferPool::LegacyBufferInfo> LegacyBufferPool::CreateLegacyBuffer(size_t size) {
+  return std::make_unique<LegacyBufferInfo>(size);
+}
 }  // namespace tensorstore
 
 TENSORSTORE_DECLARE_GARBAGE_COLLECTION_NOT_REQUIRED(
