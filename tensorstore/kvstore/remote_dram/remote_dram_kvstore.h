@@ -389,6 +389,9 @@ class UcxManager {
   /// Cleanup UCX listener if it exists (assumes mutex is held)
   void CleanupListenerNoLock();
   
+  /// Check if UCX is shutting down (safe to call from destructors)
+  bool IsShuttingDown() const { return shutdown_started_; }
+  
   /// Shutdown UCX resources
   void Shutdown();
   
@@ -404,6 +407,7 @@ class UcxManager {
   
   mutable absl::Mutex mutex_;
   bool initialized_ ABSL_GUARDED_BY(mutex_) = false;
+  std::atomic<bool> shutdown_started_{false};  // Thread-safe flag for shutdown detection
   ucp_context_h context_ ABSL_GUARDED_BY(mutex_) = nullptr;
   ucp_worker_h worker_ ABSL_GUARDED_BY(mutex_) = nullptr;
   ucp_listener_h listener_ ABSL_GUARDED_BY(mutex_) = nullptr;

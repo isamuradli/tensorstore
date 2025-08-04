@@ -1080,16 +1080,11 @@ void LogMessageBuffer(const char* buffer, size_t size, const std::string& prefix
 // AdaptiveBufferPool Implementation
 // PHASE 1 OPTIMIZATION 3: UCX memory cleanup in BufferInfo destructor
 AdaptiveBufferPool::BufferInfo::~BufferInfo() {
-  if (is_ucx_registered && memory_handle != nullptr) {
-    // Check if UCX context is still valid before unmapping
-    ucp_context_h context = UcxManager::Instance().GetContext();
-    if (context != nullptr) {
-      ucp_mem_unmap(context, memory_handle);
-      memory_handle = nullptr;  // Prevent double cleanup
-    }
-    is_ucx_registered = false;  // Mark as unregistered
+  // Only delete C++ allocated memory if data pointer is valid
+  // UCX-registered memory is unmapped during shutdown and data is set to nullptr
+  if (data != nullptr) {
+    delete[] data;
   }
-  delete[] data;
 }
 
 void AdaptiveBufferPool::Initialize() {
@@ -1234,9 +1229,58 @@ void AdaptiveBufferPool::Shutdown() {
   
   ABSL_LOG(INFO) << "AdaptiveBufferPool: Shutting down with " << buffer_pool_.size() << " buffers";
   
+  // PHASE 1: Properly unmap UCX registered memory to satisfy UCX cleanup
+  ABSL_LOG(INFO) << "Phase 1: Unmapping UCX registered memory regions";
+  size_t buffers_in_use = 0;
+  size_t ucx_regions_unmapped = 0;
+  
+  for (size_t i = 0; i < buffer_pool_.size(); ++i) {
+    try {
+      if (buffer_pool_[i]) {
+        if (buffer_pool_[i]->in_use) {
+          buffers_in_use++;
+        }
+        
+        // CRITICAL: Unmap UCX memory if registered, and nullify data pointer
+        if (buffer_pool_[i]->is_ucx_registered && buffer_pool_[i]->memory_handle != nullptr) {
+          try {
+            UcxManager& ucx_manager = UcxManager::Instance();
+            ucp_context_h context = ucx_manager.GetContext();
+            if (context != nullptr) {
+              ABSL_LOG(INFO) << "Unmapping UCX region for buffer " << i;
+              ucp_mem_unmap(context, buffer_pool_[i]->memory_handle);
+              buffer_pool_[i]->memory_handle = nullptr;
+              buffer_pool_[i]->is_ucx_registered = false;
+              // CRITICAL: Set data pointer to nullptr to prevent double-free in destructor
+              buffer_pool_[i]->data = nullptr;
+              ucx_regions_unmapped++;
+            }
+          } catch (...) {
+            ABSL_LOG(WARNING) << "Failed to unmap UCX region for buffer " << i;
+          }
+        }
+      }
+    } catch (...) {
+      ABSL_LOG(WARNING) << "Buffer " << i << " appears corrupted - skipping";
+    }
+  }
+  
+  ABSL_LOG(INFO) << "Phase 1 complete: Unmapped " << ucx_regions_unmapped << " UCX memory regions";
+  
+  if (buffers_in_use > 0) {
+    ABSL_LOG(WARNING) << "Found " << buffers_in_use << " buffers still in use";
+  }
+  
+  // PHASE 2: Properly clear the buffer pool to prevent static destructor double-free
+  // UCX memory regions are now properly unmapped, so we can safely clear the pool
+  ABSL_LOG(INFO) << "Phase 2: Clearing buffer pool to prevent static destructor double-free";
+  
+  // Clear all BufferInfo objects to prevent their destructors from running during static cleanup
   buffer_pool_.clear();
   buffer_lookup_.clear();
   initialized_ = false;
+  
+  ABSL_LOG(INFO) << "AdaptiveBufferPool shutdown complete - UCX regions unmapped, buffer pool cleared";
 }
 
 size_t AdaptiveBufferPool::SelectBufferSize(size_t required_size) const {
@@ -2141,8 +2185,14 @@ void UcxManager::Shutdown() {
     }
   }
   
-  // Clean up the adaptive buffer pool
+  // CRITICAL: Clean up the adaptive buffer pool BEFORE setting shutdown flag
+  // This ensures BufferInfo destructors can properly unmap UCX memory regions
+  // while UCX context is still valid
+  ABSL_LOG(INFO) << "Shutting down buffer pool with UCX context active";
   buffer_pool_.Shutdown();
+  
+  // NOW set shutdown flag to prevent any new buffer operations
+  shutdown_started_.store(true);
   
   // Clean up UCX resources in reverse order of creation
   if (worker_) {
