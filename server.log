@@ -1,0 +1,66 @@
+=== Node 2 Server ===
+Starting remote_dram server on: 0.0.0.0:12345
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1754339712.324329  411040 remote_dram_kvstore.cc:2425] Initializing UCX for server mode on 0.0.0.0:12345
+I0000 00:00:1754339712.324422  411040 remote_dram_kvstore.cc:1284] Creating UCX listener for address: 0.0.0.0:12345
+I0000 00:00:1754339712.324435  411040 remote_dram_kvstore.cc:1318] Binding to all interfaces (INADDR_ANY) on port 12345
+I0000 00:00:1754339712.324450  411040 remote_dram_kvstore.cc:1337] Attempting to create UCX listener with parameters configured
+I0000 00:00:1754339712.324504  411040 remote_dram_kvstore.cc:1370] UCX listener created successfully on 0.0.0.0:12345
+I0000 00:00:1754339712.324512  411040 remote_dram_kvstore.cc:1377] Posting 100 initial adaptive receive buffers
+I0000 00:00:1754339712.325065  411040 remote_dram_kvstore.cc:2434] UCX server initialized successfully, listening on 0.0.0.0:12345
+✓ Remote DRAM server started successfully!
+✓ Server is ready to receive tensor data from Node 1
+✓ Data will be stored in this node's DRAM memory
+
+Server is running and waiting for connections...
+All tensor data received from Node 1 will be stored locally
+Press Ctrl+C to stop the server
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+I0000 00:00:1754339770.879921  411047 remote_dram_kvstore.cc:361] UCX listener received connection request
+I0000 00:00:1754339770.886658  411047 remote_dram_kvstore.cc:377] Server endpoint created successfully for incoming connection
+I0000 00:00:1754339770.886854  412425 remote_dram_kvstore.cc:1512] Registered client endpoint, total clients: 1
+I0000 00:00:1754339770.895568  411047 remote_dram_kvstore.cc:388] UCX adaptive server receive completed with status: Success
+I0000 00:00:1754339770.895676  411047 remote_dram_kvstore.cc:415] Adaptive received message: magic=3735928559, type=1, key_len=14, value_len=4096, request_id=1, checksum=52633828
+I0000 00:00:1754339770.895738  411047 remote_dram_kvstore.cc:442] Adaptive server stored key-value pair: key='tensor_32x32_0', value_size=4096
+I0000 00:00:1754339770.895770  411047 remote_dram_kvstore.cc:1114] AdaptiveBufferPool: Released buffer back to pool
+I0000 00:00:1754339770.896837  412425 remote_dram_kvstore.cc:1811] Server sending write response: status_code=0
+I0000 00:00:1754339770.896905  412425 remote_dram_kvstore.cc:453] Sent adaptive write response for key: tensor_32x32_0
+I0000 00:00:1754339770.897200  411047 remote_dram_kvstore.cc:388] UCX adaptive server receive completed with status: Success
+I0000 00:00:1754339770.897226  411047 remote_dram_kvstore.cc:415] Adaptive received message: magic=3735928559, type=1, key_len=14, value_len=4096, request_id=2, checksum=52633828
+I0000 00:00:1754339770.897258  411047 remote_dram_kvstore.cc:442] Adaptive server stored key-value pair: key='tensor_32x32_1', value_size=4096
+I0000 00:00:1754339770.897278  411047 remote_dram_kvstore.cc:1114] AdaptiveBufferPool: Released buffer back to pool
+I0000 00:00:1754339770.897290  412425 remote_dram_kvstore.cc:1811] Server sending write response: status_code=0
+I0000 00:00:1754339770.897335  412425 remote_dram_kvstore.cc:453] Sent adaptive write response for key: tensor_32x32_1
+I0000 00:00:1754339770.897614  411047 remote_dram_kvstore.cc:388] UCX adaptive server receive completed with status: Success
+I0000 00:00:1754339770.897639  411047 remote_dram_kvstore.cc:415] Adaptive received message: magic=3735928559, type=1, key_len=14, value_len=4096, request_id=3, checksum=52633828
+I0000 00:00:1754339770.897670  411047 remote_dram_kvstore.cc:442] Adaptive server stored key-value pair: key='tensor_32x32_2', value_size=4096
+I0000 00:00:1754339770.897691  411047 remote_dram_kvstore.cc:1114] AdaptiveBufferPool: Released buffer back to pool
+I0000 00:00:1754339770.897704  412425 remote_dram_kvstore.cc:1811] Server sending write response: status_code=0
+I0000 00:00:1754339770.897763  412425 remote_dram_kvstore.cc:453] Sent adaptive write response for key: tensor_32x32_2
+I0000 00:00:1754339770.897957  411047 remote_dram_kvstore.cc:388] UCX adaptive server receive completed with status: Success
+I0000 00:00:1754339770.897985  411047 remote_dram_kvstore.cc:415] Adaptive received message: magic=3735928559, type=1, key_len=14, value_len=4096, request_id=4, checksum=52633828
+I0000 00:00:1754339770.898009  411047 remote_dram_kvstore.cc:442] Adaptive server stored key-value pair: key='tensor_32x32_3', value_size=4096
+I0000 00:00:1754339770.898026  411047 remote_dram_kvstore.cc:1114] AdaptiveBufferPool: Released buffer back to pool
+I0000 00:00:1754339770.898035  412425 remote_dram_kvstore.cc:1811] Server sending write response: status_code=0
+I0000 00:00:1754339770.898047  412425 remote_dram_kvstore.cc:453] Sent adaptive write response for key: tensor_32x32_3
+I0000 00:00:1754339770.898217  411047 remote_dram_kvstore.cc:388] UCX adaptive server receive completed with status: Success
+I0000 00:00:1754339770.898265  411047 remote_dram_kvstore.cc:415] Adaptive received message: magic=3735928559, type=1, key_len=14, value_len=4096, request_id=5, checksum=52633828
+I0000 00:00:1754339770.898296  411047 remote_dram_kvstore.cc:442] Adaptive server stored key-value pair: key='tensor_32x32_4', value_size=4096
+I0000 00:00:1754339770.898317  411047 remote_dram_kvstore.cc:1114] AdaptiveBufferPool: Released buffer back to pool
+I0000 00:00:1754339770.898328  412425 remote_dram_kvstore.cc:1811] Server sending write response: status_code=0
+I0000 00:00:1754339770.898340  412425 remote_dram_kvstore.cc:453] Sent adaptive write response for key: tensor_32x32_4
+I0000 00:00:1754339770.898485  411047 remote_dram_kvstore.cc:388] UCX adaptive server receive completed with status: Success
+I0000 00:00:1754339770.898527  411047 remote_dram_kvstore.cc:415] Adaptive received message: magic=3735928559, type=3, key_len=14, value_len=0, request_id=6, checksum=713454
+I0000 00:00:1754339770.898546  411047 remote_dram_kvstore.cc:464] Adaptive server received read request for key='tensor_64x64_0'
+I0000 00:00:1754339770.898559  411047 remote_dram_kvstore.cc:473] Adaptive server key 'tensor_64x64_0' not found
+I0000 00:00:1754339770.898700  411047 remote_dram_kvstore.cc:1114] AdaptiveBufferPool: Released buffer back to pool
+I0000 00:00:1754339770.898723  412425 remote_dram_kvstore.cc:1793] Server sending read response: value_size=0, status_code=1
+I0000 00:00:1754339770.898753  412425 remote_dram_kvstore.cc:484] Sent adaptive read response for key: tensor_64x64_0
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...
+Server still running and ready to receive data...

@@ -161,3 +161,19 @@ tensorstore_cc_binary(
         "//tensorstore/util:status",
     ],
 )
+
+tensorstore_cc_binary(
+    name = "tensor_benchmark_client",
+    srcs = ["tensor_benchmark_client.cc"],
+    deps = [
+        "//tensorstore",
+        "//tensorstore:array",
+        "//tensorstore:data_type",
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+        "@abseil-cpp//absl/strings:cord",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)

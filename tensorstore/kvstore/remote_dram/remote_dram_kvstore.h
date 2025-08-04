@@ -25,6 +25,7 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <atomic>
 
 #include "tensorstore/internal/json_binding/json_binding.h"
 #include "tensorstore/kvstore/driver.h"
@@ -51,12 +52,6 @@ constexpr ucp_tag_t UCX_TAG_READ_REQUEST = 0x2000;
 constexpr ucp_tag_t UCX_TAG_READ_RESPONSE = 0x2001;
 constexpr ucp_tag_t UCX_TAG_MASK = 0xF000;
 
-/// Phase 2: Protocol versioning for backward compatibility
-enum class ProtocolVersion : uint32_t {
-  V1_LEGACY = 1,    // Current protocol (default)
-  V2_CHUNKED = 2    // New chunked protocol (future use)
-};
-
 /// Message types for client-server communication
 enum class MessageType : uint32_t {
   WRITE_REQUEST = 1,
@@ -75,35 +70,10 @@ struct MessageHeader {
   uint32_t checksum;       // Simple checksum for data integrity
 } __attribute__((packed));
 
-/// Phase 2: Versioned message header for protocol evolution
-struct VersionedMessageHeader {
-  uint32_t magic_number;   // Magic number for integrity verification  
-  ProtocolVersion version; // Protocol version field
-  MessageType type;
-  uint32_t key_length;
-  uint32_t value_length;
-  uint64_t request_id;
-  uint32_t checksum;       // Simple checksum for data integrity
-  uint32_t reserved;       // Reserved for future extensions
-} __attribute__((packed));
-
-/// Write request message structure
-struct WriteMessage {
-  MessageHeader header;
-  // Followed by key_length bytes of key data
-  // Followed by value_length bytes of value data
-} __attribute__((packed));
-
 /// Write response message structure  
 struct WriteResponse {
   MessageHeader header;
   uint32_t status_code;  // 0 = success, non-zero = error
-} __attribute__((packed));
-
-/// Read request message structure
-struct ReadRequest {
-  MessageHeader header;
-  // Followed by key_length bytes of key data
 } __attribute__((packed));
 
 /// Read response message structure
@@ -191,19 +161,9 @@ public:
     return pending_reads_.size() >= kMaxConcurrentReads;
   }
   
-  bool ShouldThrottleWrites() const {
-    absl::MutexLock lock(&mutex_);
-    return pending_writes_.size() >= kMaxConcurrentWrites;
-  }
-  
   size_t GetPendingReadCount() const {
     absl::MutexLock lock(&mutex_);
     return pending_reads_.size();
-  }
-  
-  size_t GetPendingWriteCount() const {
-    absl::MutexLock lock(&mutex_);
-    return pending_writes_.size();
   }
   
 private:
@@ -215,15 +175,9 @@ private:
 /// Adaptive buffer management for UCX receive operations
 class AdaptiveBufferPool {
  public:
-  /// Phase 1: Conservative enhancement modes
-  enum class Mode {
-    LEGACY,      // Current behavior (default)
-    ENHANCED     // New capabilities (opt-in)
-  };
-
   /// Buffer size categories optimized for large chunk transfers
-  static constexpr size_t kSmallBufferSize = 1024;      // 1KB for headers/small messages
-  static constexpr size_t kMediumBufferSize = 40960;    // 40KB for payloads up to 32KB + header overhead
+  static constexpr size_t kSmallBufferSize = 16384;      // 1KB for headers/small messages
+  static constexpr size_t kMediumBufferSize = 65536;    // 64KB for payloads up to 32KB + header overhead
   static constexpr size_t kLargeBufferSize = 4194304;   // 4MB for large transfers (up to 4MB + header overhead)
   static constexpr size_t kMaxBuffers = 200;            // Reduced max buffers but larger sizes
   static constexpr size_t kInitialBuffers = 10;         // Fewer initial buffers to save memory
@@ -249,26 +203,26 @@ class AdaptiveBufferPool {
     size_t size;
     std::chrono::steady_clock::time_point allocated_time;
     bool in_use;
+    // PHASE 1 OPTIMIZATION 3: UCX memory registration support
+    ucp_mem_h memory_handle;
+    bool is_ucx_registered;
     
     BufferInfo(size_t buffer_size) 
       : data(new char[buffer_size]), size(buffer_size), 
-        allocated_time(std::chrono::steady_clock::now()), in_use(false) {}
+        allocated_time(std::chrono::steady_clock::now()), in_use(false),
+        memory_handle(nullptr), is_ucx_registered(false) {}
     
-    ~BufferInfo() { delete[] data; }
+    ~BufferInfo();
   };
   
   /// Initialize buffer pool with initial allocations
   void Initialize();
   
-  /// Phase 1: Mode management
-  void SetMode(Mode mode);
-  Mode GetMode() const { return mode_; }
-  
   /// Get an appropriate buffer for the given size requirement
   char* AcquireBuffer(size_t required_size, size_t* actual_size);
   
-  /// Phase 1: Enhanced buffer acquisition with fallback
-  char* AcquireEnhancedBuffer(size_t required_size, size_t* actual_size);
+  /// PHASE 1 OPTIMIZATION 3: UCX-aware buffer acquisition with registration
+  char* AcquireUcxBuffer(size_t required_size, size_t* actual_size, ucp_mem_h* mem_handle);
   
   /// Return a buffer to the pool for reuse
   void ReleaseBuffer(char* buffer);
@@ -296,109 +250,22 @@ class AdaptiveBufferPool {
   std::unordered_map<char*, size_t> buffer_lookup_ ABSL_GUARDED_BY(mutex_);
   bool initialized_ ABSL_GUARDED_BY(mutex_) = false;
   
-  /// Phase 1: Mode management (safe default)
-  Mode mode_ ABSL_GUARDED_BY(mutex_) = Mode::LEGACY;
-  
   /// Find best fit buffer size
   size_t SelectBufferSize(size_t required_size) const;
   
   /// Create new buffer of specified size
   std::unique_ptr<BufferInfo> CreateBuffer(size_t size);
-};
-
-/// Phase 1: Non-intrusive memory monitoring
-class MemoryMonitor {
-public:
-  void RecordAllocation(size_t size) {
-    // Lockless atomic updates only
-    total_allocated_.fetch_add(size, std::memory_order_relaxed);
-  }
   
-  void RecordDeallocation(size_t size) {
-    total_allocated_.fetch_sub(size, std::memory_order_relaxed);
-  }
+  /// PHASE 1 OPTIMIZATION 3: Create and register buffer with UCX
+  std::unique_ptr<BufferInfo> CreateAndRegisterUcxBuffer(size_t size);
   
-  bool IsMemoryPressure() const {
-    // Simple threshold check, no complex logic
-    return total_allocated_.load(std::memory_order_relaxed) > soft_limit_;
-  }
-  
-  size_t GetTotalAllocated() const {
-    return total_allocated_.load(std::memory_order_relaxed);
-  }
-  
-  void SetSoftLimit(size_t limit) {
-    soft_limit_ = limit;
-  }
-  
-private:
-  std::atomic<size_t> total_allocated_{0};
-  size_t soft_limit_ = 512 * 1024 * 1024;  // 512MB default
-};
-
-/// Phase 2: Protocol handler for version negotiation and compatibility
-class ProtocolHandler {
-public:
-  /// Negotiate protocol version with client (always prefer legacy for stability)
-  static ProtocolVersion NegotiateVersion(ProtocolVersion client_version) {
-    // Always prefer legacy for stability and performance preservation
-    return ProtocolVersion::V1_LEGACY;
-  }
-  
-  /// Check if chunking should be used for given payload size and version
-  bool ShouldUseChunking(size_t payload_size, ProtocolVersion version) const {
-    // Only use chunking for V2 and very large payloads (conservative approach)
-    return version == ProtocolVersion::V2_CHUNKED && payload_size > (1024 * 1024);
-  }
-  
-  /// Convert legacy MessageHeader to VersionedMessageHeader
-  static VersionedMessageHeader LegacyToVersioned(const MessageHeader& legacy) {
-    VersionedMessageHeader versioned;
-    versioned.magic_number = legacy.magic_number;
-    versioned.version = ProtocolVersion::V1_LEGACY;
-    versioned.type = legacy.type;
-    versioned.key_length = legacy.key_length;
-    versioned.value_length = legacy.value_length;
-    versioned.request_id = legacy.request_id;
-    versioned.checksum = legacy.checksum;
-    versioned.reserved = 0;
-    return versioned;
-  }
-  
-  /// Convert VersionedMessageHeader to legacy MessageHeader  
-  static MessageHeader VersionedToLegacy(const VersionedMessageHeader& versioned) {
-    MessageHeader legacy;
-    legacy.magic_number = versioned.magic_number;
-    legacy.type = versioned.type;
-    legacy.key_length = versioned.key_length;
-    legacy.value_length = versioned.value_length;
-    legacy.request_id = versioned.request_id;
-    legacy.checksum = versioned.checksum;
-    return legacy;
-  }
-  
-  /// Detect protocol version from message header
-  static ProtocolVersion DetectVersion(const void* message_data, size_t size) {
-    if (size < sizeof(MessageHeader)) {
-      return ProtocolVersion::V1_LEGACY; // Default to legacy for invalid messages
-    }
-    
-    // For now, always return V1_LEGACY to maintain backward compatibility
-    // Future implementation will detect version based on magic number or header size
-    return ProtocolVersion::V1_LEGACY;
-  }
+  /// Try to register an existing buffer with UCX
+  bool TryRegisterBufferWithUcx(BufferInfo* buffer);
 };
 
 /// Server-side storage for key-value pairs
 class RemoteDramStorage {
  public:
-  /// Phase 2: Storage cleanup modes for conservative memory management
-  enum class CleanupMode {
-    DISABLED,     // Current behavior (default)
-    TTL_ONLY,     // Simple TTL cleanup (safe)  
-    ADVANCED      // LRU + TTL cleanup (opt-in)
-  };
-  
   /// Store a key-value pair
   void Store(const std::string& key, const absl::Cord& value);
   
@@ -417,40 +284,10 @@ class RemoteDramStorage {
   /// Get storage statistics
   size_t GetKeyCount() const;
   
-  /// Phase 2: Set cleanup mode (safe default)
-  void SetCleanupMode(CleanupMode mode) {
-    absl::MutexLock lock(&mutex_);
-    if (mode == CleanupMode::DISABLED) {
-      cleanup_enabled_ = false;  // Preserve current behavior
-    } else {
-      cleanup_mode_ = mode;
-      cleanup_enabled_ = false;  // Keep disabled by default for safety
-    }
-    ABSL_LOG(INFO) << "RemoteDramStorage: Cleanup mode set to " 
-                   << (mode == CleanupMode::DISABLED ? "DISABLED" : 
-                       mode == CleanupMode::TTL_ONLY ? "TTL_ONLY" : "ADVANCED");
-  }
-  
-  /// Phase 2: Get current cleanup mode
-  CleanupMode GetCleanupMode() const { 
-    absl::MutexLock lock(&mutex_);
-    return cleanup_mode_; 
-  }
-  
-  /// Phase 2: Enable/disable cleanup (safe by default)
-  void SetCleanupEnabled(bool enabled) {
-    absl::MutexLock lock(&mutex_);
-    cleanup_enabled_ = enabled;
-    ABSL_LOG(INFO) << "RemoteDramStorage: Cleanup " << (enabled ? "enabled" : "disabled");
-  }
-  
  private:
   mutable absl::Mutex mutex_;
   std::unordered_map<std::string, absl::Cord> storage_ ABSL_GUARDED_BY(mutex_);
   
-  /// Phase 2: Conservative cleanup management (safe defaults)
-  CleanupMode cleanup_mode_ ABSL_GUARDED_BY(mutex_) = CleanupMode::DISABLED;
-  bool cleanup_enabled_ ABSL_GUARDED_BY(mutex_) = false;  // Always start disabled
 };
 
 /// Singleton UCX Manager to handle global UCX state and worker polling
@@ -489,6 +326,12 @@ class UcxManager {
   /// Complete a pending read operation
   void CompletePendingReadOperation(uint64_t request_id, kvstore::ReadResult result);
   
+  /// PHASE 1 OPTIMIZATION 4: Fast-path completion for simple operations (lock-free when possible)
+  void CompletePendingOperationDirect(uint64_t request_id, absl::Status status);
+  
+  /// PHASE 1 OPTIMIZATION 4: Fast-path read completion for simple operations (lock-free when possible) 
+  void CompletePendingReadOperationDirect(uint64_t request_id, kvstore::ReadResult result);
+  
   /// Generate next request ID
   uint64_t GenerateRequestId();
   
@@ -506,12 +349,6 @@ class UcxManager {
   
   /// Get the adaptive buffer pool
   AdaptiveBufferPool& GetBufferPool() { return buffer_pool_; }
-  
-  /// Phase 1: Get the memory monitor
-  MemoryMonitor& GetMemoryMonitor() { return memory_monitor_; }
-  
-  /// Phase 2: Get the protocol handler
-  ProtocolHandler& GetProtocolHandler() { return protocol_handler_; }
   
   /// Get the async operation manager for throttling
   AsyncOperationManager& GetAsyncManager() { return async_manager_; }
@@ -582,12 +419,6 @@ class UcxManager {
   /// Adaptive buffer pool for efficient memory management
   AdaptiveBufferPool buffer_pool_;
   
-  /// Phase 1: Memory monitoring for enhanced buffer management
-  MemoryMonitor memory_monitor_;
-  
-  /// Phase 2: Protocol handler for version negotiation
-  ProtocolHandler protocol_handler_;
-  
   /// Async operation manager for throttling concurrent operations
   AsyncOperationManager async_manager_;
   
@@ -609,11 +440,10 @@ class UcxManager {
   /// Client-side endpoints for client mode (for cleanup)
   std::vector<ucp_ep_h> client_side_endpoints_ ABSL_GUARDED_BY(mutex_);
   
-  uint64_t next_request_id_ ABSL_GUARDED_BY(mutex_) = 1;
+  // PHASE 1 OPTIMIZATION 2: Lock-free atomic request ID generation
+  std::atomic<uint64_t> next_request_id_{1};
 };
 
-/// Send a notification to the server process that new data has been written
-void NotifyServerOfNewData(const kvstore::Key& key, const absl::Cord& value);
 
 /// Client-side callback for handling write responses
 void ClientWriteResponseCallback(void* request, ucs_status_t status, const ucp_tag_recv_info_t* info, void* user_data);
@@ -635,84 +465,6 @@ namespace message_utils {
   void LogMessageBuffer(const char* buffer, size_t size, const std::string& prefix);
 }
 
-/// Phase 0: Foundation Preservation - Performance baseline and fallback mechanisms
-class PerformanceBaseline {
-public:
-  static constexpr size_t kOptimalChunkSize = 16384;
-  static constexpr double kMinWriteThroughput = 50.0;  // MB/s
-  static constexpr double kMinReadThroughput = 80.0;   // MB/s
-  
-  struct BenchmarkResult {
-    double write_throughput_mbps;
-    double read_throughput_mbps;
-    std::chrono::milliseconds avg_latency;
-  };
-  
-  static bool ShouldUseFastPath(size_t chunk_size, bool has_memory_pressure) {
-    return chunk_size == kOptimalChunkSize && !has_memory_pressure;
-  }
-  
-  static BenchmarkResult RunBaseline();
-  static bool ValidatePerformance(const BenchmarkResult& result);
-};
-
-/// Legacy buffer pool preserving exact current implementation for fallback
-class LegacyBufferPool {
-public:
-  static constexpr size_t kLegacySmallSize = 1024;
-  static constexpr size_t kLegacyMediumSize = 20480;  
-  static constexpr size_t kLegacyLargeSize = 69632;
-  
-  struct LegacyBufferInfo {
-    char* data;
-    size_t size;
-    std::chrono::steady_clock::time_point allocated_time;
-    bool in_use;
-    
-    LegacyBufferInfo(size_t buffer_size) 
-      : data(new char[buffer_size]), size(buffer_size), 
-        allocated_time(std::chrono::steady_clock::now()), in_use(false) {}
-    
-    ~LegacyBufferInfo() { delete[] data; }
-  };
-  
-  void Initialize();
-  char* AcquireLegacyBuffer(size_t required_size, size_t* actual_size);
-  void ReleaseLegacyBuffer(char* buffer);
-  void Shutdown();
-  
-private:
-  mutable absl::Mutex mutex_;
-  std::vector<std::unique_ptr<LegacyBufferInfo>> legacy_pool_ ABSL_GUARDED_BY(mutex_);
-  std::unordered_map<char*, size_t> buffer_lookup_ ABSL_GUARDED_BY(mutex_);
-  bool initialized_ ABSL_GUARDED_BY(mutex_) = false;
-  
-  size_t SelectLegacyBufferSize(size_t required_size) const;
-  std::unique_ptr<LegacyBufferInfo> CreateLegacyBuffer(size_t size);
-};
-
-
-/// Phase 2: Feature flags with safe defaults for production safety
-struct RemoteDramFeatureFlags {
-  bool enhanced_buffer_pool = false;        // Off by default
-  bool memory_monitoring = false;           // Off by default  
-  bool protocol_versioning = false;         // Off by default
-  bool storage_cleanup = false;             // Off by default
-  bool chunked_transfers = false;           // Off by default
-  bool async_throttling = true;             // Enable throttling by default
-  
-  // Always preserve 16KB fast path
-  static constexpr bool always_preserve_16kb_path = true;
-  
-  /// Log current feature flag state
-  void LogState() const {
-    ABSL_LOG(INFO) << "RemoteDramFeatureFlags: enhanced_buffer_pool=" << enhanced_buffer_pool
-                   << ", memory_monitoring=" << memory_monitoring  
-                   << ", protocol_versioning=" << protocol_versioning
-                   << ", storage_cleanup=" << storage_cleanup
-                   << ", chunked_transfers=" << chunked_transfers;
-  }
-};
 
 }  // namespace tensorstore
 
