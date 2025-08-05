@@ -81,6 +81,16 @@ class UcxCallbackDispatcher {
   static std::atomic<bool> worker_running_;
   static std::thread worker_thread_;
   
+  // Static cleanup helper to ensure thread is joined before program exit
+  struct CleanupHelper {
+    ~CleanupHelper() {
+      if (worker_running_.load()) {
+        UcxCallbackDispatcher::Shutdown();
+      }
+    }
+  };
+  static CleanupHelper cleanup_helper_;
+  
   static void WorkerLoop() {
     while (worker_running_.load() || !callback_queue_.empty()) {
       std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -133,6 +143,7 @@ std::mutex UcxCallbackDispatcher::queue_mutex_;
 std::condition_variable UcxCallbackDispatcher::queue_cv_;
 std::atomic<bool> UcxCallbackDispatcher::worker_running_{false};
 std::thread UcxCallbackDispatcher::worker_thread_;
+UcxCallbackDispatcher::CleanupHelper UcxCallbackDispatcher::cleanup_helper_;
 
 
 // Enhanced UCX Buffer wrapper with proper RAII for memory safety
