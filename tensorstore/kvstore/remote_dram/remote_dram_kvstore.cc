@@ -633,8 +633,8 @@ void ServerReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
       ABSL_LOG(INFO) << "Server stored key-value pair: key='" << key 
                      << "', value_size=" << value.size();
       
-      // std::cout << "📥 SERVER: Received write request [ID:" << header->request_id << "] key='" << key 
-      //           << "' value='" << std::string(value) << "' - STORED SUCCESS" << std::endl;
+      std::cout << "📥 SERVER: Received write request [ID:" << header->request_id << "] key='" << key 
+                << "' value='" << std::string(value) << "' - STORED SUCCESS" << std::endl;
       
       // ENHANCED: Send write response back to client using safe callback dispatcher
       uint64_t request_id = header->request_id;
@@ -1459,6 +1459,7 @@ absl::Status UcxManager::Initialize() {
   buffer_pool_.Initialize();
   
   // Start worker progress polling outside of mutex scope
+  ABSL_LOG(INFO) << "Starting UCX worker progress task";
   StartWorkerProgressTask();
   
   return absl::OkStatus();
@@ -1647,6 +1648,12 @@ Result<ucp_ep_h> UcxManager::CreateClientEndpoint(const std::string& server_addr
   }
   
   ABSL_LOG(INFO) << "UCX client endpoint created successfully to " << server_addr;
+  
+  // Force progress to establish connection
+  for (int i = 0; i < 10; ++i) {
+    ucp_worker_progress(worker_);
+  }
+  ABSL_LOG(INFO) << "Forced initial progress after endpoint creation";
   
   // Register this endpoint for cleanup
   RegisterClientSideEndpointNoLock(client_endpoint);
@@ -2054,9 +2061,11 @@ void UcxManager::SendWriteResponse(ucp_ep_h client_endpoint, uint64_t request_id
 
 void UcxManager::StartWorkerProgressTask() {
   if (progress_task_running_.load()) {
+    ABSL_LOG(INFO) << "Worker progress task already running";
     return;
   }
   
+  ABSL_LOG(INFO) << "Starting worker progress task";
   progress_task_running_.store(true);
   
   // ENHANCED: Use a joinable thread with proper lifetime management
@@ -2072,7 +2081,7 @@ void UcxManager::StartWorkerProgressTask() {
 }
 
 void UcxManager::WorkerProgressTask() {
-  // ABSL_LOG(INFO) << "UCX worker progress polling started";
+  ABSL_LOG(INFO) << "UCX worker progress polling started";
   
   auto last_stats_time = std::chrono::steady_clock::now();
   const auto stats_interval = std::chrono::seconds(30);  // Report stats every 30 seconds
@@ -2085,7 +2094,10 @@ void UcxManager::WorkerProgressTask() {
       }
       
       // Poll for progress
-      ucp_worker_progress(worker_);
+      unsigned progress_count = ucp_worker_progress(worker_);
+      if (progress_count > 0) {
+        ABSL_LOG(INFO) << "UCX progress made " << progress_count << " operations";
+      }
     }
     
     // Periodically report buffer pool statistics
@@ -2317,7 +2329,7 @@ class RemoteDramDriver
     auto& ucx_manager = UcxManager::Instance();
     uint64_t request_id = ucx_manager.GenerateRequestId();
     
-    // ABSL_LOG(INFO) << "WriteRemote sending data for key '" << key << "' with " << value.size() << " bytes to server";
+    ABSL_LOG(INFO) << "WriteRemote sending data for key '" << key << "' with " << value.size() << " bytes to server";
     
     // PHASE 1 OPTIMIZATION 3: UCX-aware zero-copy message construction with registered memory
     size_t message_size;
@@ -2328,8 +2340,8 @@ class RemoteDramDriver
     // Log message for debugging
     message_utils::LogMessageBuffer(message_buffer, message_size, "Client sending write request");
     
-    // ABSL_LOG(INFO) << "Sending UCX write request: key='" << key << "', value_size=" << value.size() << ", request_id=" << request_id;
-    // std::cout << "📤 CLIENT: Sending write request [ID:" << request_id << "]" << std::endl;
+    ABSL_LOG(INFO) << "Sending UCX write request: key='" << key << "', value_size=" << value.size() << ", request_id=" << request_id;
+    std::cout << "📤 CLIENT: Sending write request [ID:" << request_id << "]" << std::endl;
     
     // Create promise/future pair
     auto [promise, future] = PromiseFuturePair<void>::Make();
@@ -2397,7 +2409,7 @@ class RemoteDramDriver
       delete user_data;
     } else {
       // Send is in progress, will complete asynchronously via SendCallback
-      // ABSL_LOG(INFO) << "UCX write request in progress for request_id=" << request_id;
+      ABSL_LOG(INFO) << "UCX write request in progress for request_id=" << request_id;
       // Resources will be cleaned up in SendCallback
     }
     
