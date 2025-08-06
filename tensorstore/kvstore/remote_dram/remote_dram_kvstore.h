@@ -172,96 +172,6 @@ private:
   std::unordered_map<uint64_t, Operation> pending_writes_ ABSL_GUARDED_BY(mutex_);
 };
 
-/// Adaptive buffer management for UCX receive operations
-class AdaptiveBufferPool {
- public:
-  /// Buffer size categories optimized for large chunk transfers
-  static constexpr size_t kSmallBufferSize = 16384;      // 1KB for headers/small messages
-  static constexpr size_t kMediumBufferSize = 65536;    // 64KB for payloads up to 32KB + header overhead
-  static constexpr size_t kLargeBufferSize = 4194304;   // 4MB for large transfers (up to 4MB + header overhead)
-  static constexpr size_t kMaxBuffers = 200;            // Reduced max buffers but larger sizes
-  static constexpr size_t kInitialBuffers = 10;         // Fewer initial buffers to save memory
-  
-  /// Phase 1: Safe buffer tiers with exact current defaults
-  struct BufferTier {
-    size_t size;
-    size_t initial_count;
-    size_t max_count;
-    size_t reserved;  // For future use
-  };
-  
-  static constexpr BufferTier kSafeTiers[] = {
-    {1024,   20,  100, 0},   // Current small (unchanged)
-    {40960,  20,  100, 0},   // Updated medium for 32KB+ support
-    {69632,  20,  100, 0},   // Current large (unchanged)
-    {262144, 0,   0,   0},   // New tier (disabled by default)
-    {1048576, 0,  0,   0},   // New tier (disabled by default)
-  };
-  
-  struct BufferInfo {
-    char* data;
-    size_t size;
-    std::chrono::steady_clock::time_point allocated_time;
-    bool in_use;
-    // PHASE 1 OPTIMIZATION 3: UCX memory registration support
-    ucp_mem_h memory_handle;
-    bool is_ucx_registered;
-    
-    BufferInfo(size_t buffer_size) 
-      : data(new char[buffer_size]), size(buffer_size), 
-        allocated_time(std::chrono::steady_clock::now()), in_use(false),
-        memory_handle(nullptr), is_ucx_registered(false) {}
-    
-    ~BufferInfo();
-  };
-  
-  /// Initialize buffer pool with initial allocations
-  void Initialize();
-  
-  /// Get an appropriate buffer for the given size requirement
-  char* AcquireBuffer(size_t required_size, size_t* actual_size);
-  
-  /// PHASE 1 OPTIMIZATION 3: UCX-aware buffer acquisition with registration
-  char* AcquireUcxBuffer(size_t required_size, size_t* actual_size, ucp_mem_h* mem_handle);
-  
-  /// Return a buffer to the pool for reuse
-  void ReleaseBuffer(char* buffer);
-  
-  /// Clean up unused buffers older than threshold
-  void CleanupOldBuffers(std::chrono::seconds max_age = std::chrono::seconds(30));
-  
-  /// Get buffer pool statistics
-  struct Stats {
-    size_t total_buffers;
-    size_t buffers_in_use;
-    size_t small_buffers;
-    size_t medium_buffers;
-    size_t large_buffers;
-    size_t memory_usage_bytes;
-  };
-  Stats GetStats() const;
-  
-  /// Shutdown and cleanup all buffers
-  void Shutdown();
-  
- private:
-  mutable absl::Mutex mutex_;
-  std::vector<std::unique_ptr<BufferInfo>> buffer_pool_ ABSL_GUARDED_BY(mutex_);
-  std::unordered_map<char*, size_t> buffer_lookup_ ABSL_GUARDED_BY(mutex_);
-  bool initialized_ ABSL_GUARDED_BY(mutex_) = false;
-  
-  /// Find best fit buffer size
-  size_t SelectBufferSize(size_t required_size) const;
-  
-  /// Create new buffer of specified size
-  std::unique_ptr<BufferInfo> CreateBuffer(size_t size);
-  
-  /// PHASE 1 OPTIMIZATION 3: Create and register buffer with UCX
-  std::unique_ptr<BufferInfo> CreateAndRegisterUcxBuffer(size_t size);
-  
-  /// Try to register an existing buffer with UCX
-  bool TryRegisterBufferWithUcx(BufferInfo* buffer);
-};
 
 /// Server-side storage for key-value pairs
 class RemoteDramStorage {
@@ -320,35 +230,20 @@ class UcxManager {
   /// Register a pending read operation
   void RegisterPendingReadOperation(uint64_t request_id, Promise<kvstore::ReadResult> promise);
   
-  /// Complete a pending write operation
-  void CompletePendingOperation(uint64_t request_id, absl::Status status);
-  
-  /// Complete a pending read operation
-  void CompletePendingReadOperation(uint64_t request_id, kvstore::ReadResult result);
-  
-  /// PHASE 1 OPTIMIZATION 4: Fast-path completion for simple operations (lock-free when possible)
+  /// Complete a pending write operation (optimized with fast-path)
   void CompletePendingOperationDirect(uint64_t request_id, absl::Status status);
   
-  /// PHASE 1 OPTIMIZATION 4: Fast-path read completion for simple operations (lock-free when possible) 
+  /// Complete a pending read operation (optimized with fast-path)
   void CompletePendingReadOperationDirect(uint64_t request_id, kvstore::ReadResult result);
   
   /// Generate next request ID
   uint64_t GenerateRequestId();
   
-  /// Post a receive buffer for server-side message handling
-  void PostServerReceive();
+  /// Post UCX native receive buffer with optimal sizing
+  /// @param already_locked If true, assumes mutex is already held
+  void PostAdaptiveServerReceive(bool already_locked = false);
   
-  /// Post receive buffer without acquiring mutex (for use within locked context)
-  void PostServerReceiveNoLock();
-  
-  /// Post adaptive receive buffer with optimal sizing
-  void PostAdaptiveServerReceive();
-  
-  /// Post adaptive receive buffer without acquiring mutex (for use within locked context)
-  void PostAdaptiveServerReceiveNoLock();
-  
-  /// Get the adaptive buffer pool
-  AdaptiveBufferPool& GetBufferPool() { return buffer_pool_; }
+  /// UCX native memory management - no buffer pool needed
   
   /// Get the async operation manager for throttling
   AsyncOperationManager& GetAsyncManager() { return async_manager_; }
@@ -395,6 +290,16 @@ class UcxManager {
   /// Shutdown UCX resources
   void Shutdown();
   
+  /// Remove completed request from active list (for callback use)
+  void RemoveActiveRequest(void* request);
+  
+  /// Remove completed request from active list without acquiring mutex (for use within locked context)
+  void RemoveActiveRequestNoLock(void* request);
+  
+  // CONCURRENCY CONTROL: Public for callback access
+  // Atomic counter for active receive buffers
+  std::atomic<int> active_receive_buffers_{0};
+  
  private:
   UcxManager() = default;
   ~UcxManager();
@@ -420,8 +325,7 @@ class UcxManager {
   /// Server-side storage
   RemoteDramStorage storage_;
   
-  /// Adaptive buffer pool for efficient memory management
-  AdaptiveBufferPool buffer_pool_;
+  /// UCX native memory management - no buffer pool needed
   
   /// Async operation manager for throttling concurrent operations
   AsyncOperationManager async_manager_;
@@ -446,6 +350,9 @@ class UcxManager {
   
   // PHASE 1 OPTIMIZATION 2: Lock-free atomic request ID generation
   std::atomic<uint64_t> next_request_id_{1};
+  
+  // CONCURRENCY CONTROL: Limit concurrent receive buffers to prevent crashes
+  static constexpr int kMaxConcurrentReceiveBuffers = 5;  // Stable limit from testing
 };
 
 

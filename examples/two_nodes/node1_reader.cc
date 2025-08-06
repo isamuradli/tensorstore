@@ -56,7 +56,7 @@ int main(int argc, char* argv[]) {
   // Read the tensor data written by node1_writer
   std::cout << "\nReading tensor data from Node 2's DRAM..." << std::endl;
   
-  for (int i = 1; i < 100; i++) {
+  for (int i = 1; i < 10; i++) {
     std::string index_str = std::to_string(i);
     std::string test_key = "testkey" + index_str;
     auto tensor_read = tensorstore::kvstore::Read(*kvstore, test_key).result();

@@ -108,6 +108,24 @@ tensorstore_cc_binary(
 )
 
 tensorstore_cc_binary(
+    name = "zarr_256mb_client",
+    srcs = ["zarr_256mb_client.cc"],
+    deps = [
+        "//tensorstore",
+        "//tensorstore:all_drivers",
+        "//tensorstore:array",
+        "//tensorstore:data_type",
+        "//tensorstore:open",
+        "//tensorstore:spec",
+        "//tensorstore/index_space:dim_expression",
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+    ],
+)
+
+tensorstore_cc_binary(
     name = "zarr_tensor_client",
     srcs = ["zarr_tensor_client.cc"],
     deps = [
@@ -175,5 +193,45 @@ tensorstore_cc_binary(
         "//tensorstore/util:status",
         "@abseil-cpp//absl/strings:cord",
         "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "concurrent_writer_test", 
+    srcs = ["concurrent_writer_test.cc"],
+    deps = [
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+        "@abseil-cpp//absl/strings:cord",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "small_concurrent_test", 
+    srcs = ["small_concurrent_test.cc"],
+    deps = [
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+        "@abseil-cpp//absl/strings:cord",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
+tensorstore_cc_binary(
+    name = "minimal_concurrent_test", 
+    srcs = ["minimal_concurrent_test.cc"],
+    deps = [
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore:spec",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+        "@abseil-cpp//absl/strings:cord",
+        "@abseil-cpp//absl/time",
     ],
 )
