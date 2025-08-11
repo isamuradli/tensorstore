@@ -56,7 +56,7 @@ int main(int argc, char* argv[]) {
       {"compressor", nullptr},  // No compression for simplicity
       {"dtype", "<f4"},         // Little-endian 32-bit float
       {"shape", {2, 3, 4}},
-      {"chunks", {1, 3, 4}}     // Chunk size
+      {"chunks", {1,1,1 }}     // Chunk size
     }}
   }, tensorstore::OpenMode::create).result();
   
@@ -115,7 +115,7 @@ int main(int argc, char* argv[]) {
     {"metadata", {
       {"dtype", "<f4"},
       {"shape", {2, 3, 4}},
-      {"chunks", {1, 3, 4}}
+      {"chunks", {1, 1, 1}}
     }}
   }, tensorstore::OpenMode::open).result();
   

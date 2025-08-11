@@ -1411,7 +1411,6 @@ ucp_ep_h UcxManager::GetClientEndpoint() const {
   return client_endpoints_.back();
 }
 
-// Removed PostServerReceive() and PostServerReceiveNoLock() - using UCX native PostAdaptiveServerReceive() instead
 
 void UcxManager::PostAdaptiveServerReceive(bool already_locked) {
   // CONCURRENCY CONTROL: Check if we've reached the limit
@@ -1423,7 +1422,7 @@ void UcxManager::PostAdaptiveServerReceive(bool already_locked) {
   }
   
   // Use UCX native memory for receive buffer
-  size_t buffer_size = sizeof(MessageHeader) + 4194304;  // 4MB + header
+  size_t buffer_size = sizeof(MessageHeader) + 256 + 4194304;  // 4MB + header
   auto native_buffer = UcxNativeBuffer::Create(context_, buffer_size);
   
   if (!native_buffer || !native_buffer->is_valid()) {
@@ -1857,6 +1856,8 @@ class RemoteDramDriver
   
   Future<TimestampedStorageGeneration> WriteRemote(const kvstore::Key& key, 
                                                    const absl::Cord& value) {
+
+    std::cout << "\n####################################\nCALLING WRITE REMOTE for key: " << key << "\n####################################\n"<<std::endl;
     // Reinitialize client endpoint if null (connection persistence fix)
     if (!client_endpoint_) {
       auto& ucx_manager = UcxManager::Instance();
