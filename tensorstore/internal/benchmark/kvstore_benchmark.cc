@@ -49,10 +49,101 @@ bazel run -c opt \
 1MB    --chunk_size=1048576
 2MB    --chunk_size=2097152  (default)
 4MB    --chunk_size=4194304
+8MB    --chunk_size=8388608
+16MB   --chunks_size=16777216
+
 
 256MB  --total_bytes=268435456
 1GB    --total_bytes=1073741824  (default)
 4GB    --total_bytes=4294967296
+*/
+
+
+/*
+16KB chunk
+64KB total
+bazel run -c opt //tensorstore/internal/benchmark:kvstore_benchmark -- --kvstore_spec='{"driver": "remote_dram", "remote_addr": "127.0.0.1:12345"}'  --repeat_reads=1 --repeat_writes=1 --chunk_size=16384 --total_bytes=65536
+
+R=76
+W=68
+*/
+
+/*
+16KB chunk
+128KB total
+bazel run -c opt //tensorstore/internal/benchmark:kvstore_benchmark -- --kvstore_spec='{"driver": "remote_dram", "remote_addr": "127.0.0.1:12345"}'  --repeat_reads=1 --repeat_writes=1 --chunk_size=16384 --total_bytes=131072
+
+R=141
+W=113
+*/
+
+/*
+16KB chunk
+512KB total
+bazel run -c opt //tensorstore/internal/benchmark:kvstore_benchmark -- --kvstore_spec='{"driver": "remote_dram", "remote_addr": "127.0.0.1:12345"}'  --repeat_reads=1 --repeat_writes=1 --chunk_size=16384 --total_bytes=524288
+
+R=239
+W=162
+*/
+
+/*
+16KB chunk
+1MB total
+bazel run -c opt //tensorstore/internal/benchmark:kvstore_benchmark -- --kvstore_spec='{"driver": "remote_dram", "remote_addr": "127.0.0.1:12345"}'  --repeat_reads=1 --repeat_writes=1 --chunk_size=16384 --total_bytes=1048576
+
+R=79
+W=204
+*/
+
+/*
+128kb chunk
+16MB total
+bazel run -c opt //tensorstore/internal/benchmark:kvstore_benchmark -- --kvstore_spec='{"driver": "remote_dram", "remote_addr": "127.0.0.1:12345"}'  --repeat_reads=1 --repeat_writes=1 --chunk_size=131072 --total_bytes=16777216
+
+R=fail
+W=786
+*/
+
+/*
+256KB chunk
+16MB total
+bazel run -c opt //tensorstore/internal/benchmark:kvstore_benchmark -- --kvstore_spec='{"driver": "remote_dram", "remote_addr": "127.0.0.1:12345"}'  --repeat_reads=1 --repeat_writes=1 --chunk_size=262144 --total_bytes=16777216
+
+R=47
+W=630
+*/
+
+/*
+512KB chunk
+16MB total
+bazel run -c opt //tensorstore/internal/benchmark:kvstore_benchmark -- --kvstore_spec='{"driver": "remote_dram", "remote_addr": "127.0.0.1:12345"}'  --repeat_reads=1 --repeat_writes=1 --chunk_size=524288 --total_bytes=16777216
+
+R=2052
+W=1067
+*/
+
+/*
+4MB chunk
+16MB total
+bazel run -c opt //tensorstore/internal/benchmark:kvstore_benchmark -- --kvstore_spec='{"driver": "remote_dram", "remote_addr": "127.0.0.1:12345"}'  --repeat_reads=1 --repeat_writes=1 --chunk_size=4194304 --total_bytes=16777216
+*/
+
+/*
+2MB chunk
+16MB total
+bazel run -c opt //tensorstore/internal/benchmark:kvstore_benchmark -- --kvstore_spec='{"driver": "remote_dram", "remote_addr": "127.0.0.1:12345"}'  --repeat_reads=1 --repeat_writes=1 --chunk_size=2097152 --total_bytes=16777216
+
+R=2389.49
+W=1064
+*/
+
+/*
+1MB chunk
+16MB total
+bazel run -c opt //tensorstore/internal/benchmark:kvstore_benchmark -- --kvstore_spec='{"driver": "remote_dram", "remote_addr": "127.0.0.1:12345"}'  --repeat_reads=1 --repeat_writes=1 --chunk_size=1048576 --total_bytes=16777216
+
+R=2231
+W=1157
 */
 
 #include <stddef.h>

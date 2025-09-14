@@ -2,7 +2,7 @@
 cc_library(
     name = "ucs",
     defines = ["TENSORSTORE_SYSTEM_UCX"],
-    linkopts = ["-lucs"],
+    linkopts = ["-L/usr/local/lib", "-lucs"],
     visibility = ["//visibility:public"],
 )
 
@@ -10,7 +10,7 @@ cc_library(
 cc_library(
     name = "uct",
     defines = ["TENSORSTORE_SYSTEM_UCX"],
-    linkopts = ["-luct"],
+    linkopts = ["-L/usr/local/lib", "-luct"],
     deps = [":ucs"],
     visibility = ["//visibility:public"],
 )
@@ -19,7 +19,7 @@ cc_library(
 cc_library(
     name = "ucp", 
     defines = ["TENSORSTORE_SYSTEM_UCX"],
-    linkopts = ["-lucp"],
+    linkopts = ["-L/usr/local/lib", "-lucp"],
     deps = [":ucs", ":uct"],
     visibility = ["//visibility:public"],
 )
@@ -28,6 +28,12 @@ cc_library(
 cc_library(
     name = "ucx",
     defines = ["TENSORSTORE_SYSTEM_UCX"],
-    linkopts = ["-lucp", "-luct", "-lucs"],
+    linkopts = [
+        "-L/usr/local/lib",
+        "-Wl,-rpath,/usr/local/lib",
+        "-lucp",
+        "-luct", 
+        "-lucs"
+    ],
     visibility = ["//visibility:public"],
 ) 

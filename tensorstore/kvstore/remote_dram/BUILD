@@ -8,8 +8,8 @@ licenses(["notice"])
 
 tensorstore_cc_library(
     name = "remote_dram",
-    srcs = ["remote_dram_kvstore.cc"],
-    hdrs = ["remote_dram_kvstore.h"],
+    srcs = ["remote_dram_kvstore.cc", "unified_buffer_manager.cc"],
+    hdrs = ["remote_dram_kvstore.h", "unified_buffer_manager.h"],
     deps = [
         "//tensorstore/internal:intrusive_ptr",
         "//tensorstore/internal:uri_utils",
@@ -121,4 +121,15 @@ tensorstore_cc_binary(
         ":phase3_regression_test",
         "@abseil-cpp//absl/log:absl_log",
     ],
-) 
+)
+
+# Phase 1 Test: UCX Native Wait Implementation
+tensorstore_cc_binary(
+    name = "phase1_test",
+    srcs = ["phase1_test.cc"],
+    deps = [
+        ":remote_dram",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/status",
+    ],
+)

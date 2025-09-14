@@ -16,7 +16,7 @@
 
 #include <iostream>
 #include <vector>
-#include <cmath>
+#include <cstdint>
 
 #include "tensorstore/array.h"
 #include "tensorstore/data_type.h"
@@ -34,16 +34,31 @@ int main(int argc, char* argv[]) {
   std::cout << "=== Zarr Writer Client ===" << std::endl;
   std::cout << "Connecting to remote DRAM server: " << server_addr << std::endl;
   
-  // Create a 3D tensor (2x3x4) with test data
-  auto tensor = tensorstore::MakeArray<float>(
-      {{{1.0f, 2.0f, 3.0f, 4.0f},
-        {5.0f, 6.0f, 7.0f, 8.0f},
-        {9.0f, 10.0f, 11.0f, 12.0f}},
-       {{13.0f, 14.0f, 15.0f, 16.0f},
-        {17.0f, 18.0f, 19.0f, 20.0f},
-        {21.0f, 22.0f, 23.0f, 24.0f}}});
+  // Create a 3D tensor (128x128x64) = 4MB of int32_t data
+  // This is 128*128*64 = 1,048,576 integers = 4,194,304 bytes
+  const int dim0 = 128;
+  const int dim1 = 128; 
+  const int dim2 = 64;
   
-  std::cout << "Created 2x3x4 tensor with shape " << tensor.shape() << std::endl;
+  std::cout << "Creating large tensor (" << dim0 << "x" << dim1 << "x" << dim2 << ")..." << std::endl;
+  
+  // Generate test data programmatically
+  auto tensor = tensorstore::AllocateArray<int32_t>({dim0, dim1, dim2}, tensorstore::c_order, tensorstore::default_init);
+  
+  // Fill with test data
+  for (int i = 0; i < dim0; ++i) {
+    for (int j = 0; j < dim1; ++j) {
+      for (int k = 0; k < dim2; ++k) {
+        // Create a pattern that's easy to verify
+        int32_t value = static_cast<int32_t>(i * 1000000 + j * 1000 + k);
+        tensor(i, j, k) = value;
+      }
+    }
+  }
+  
+  std::cout << "Created " << dim0 << "x" << dim1 << "x" << dim2 << " tensor with shape " << tensor.shape() << std::endl;
+  float size_mb = (dim0 * dim1 * dim2 * sizeof(int32_t)) / (1024.0f * 1024.0f);
+  std::cout << "Total data size: " << size_mb << " MB" << std::endl;
   
   // Open TensorStore with Zarr driver using remote_dram kvstore
   auto store_result = tensorstore::Open({
@@ -54,9 +69,9 @@ int main(int argc, char* argv[]) {
     }},
     {"metadata", {
       {"compressor", nullptr},  // No compression for simplicity
-      {"dtype", "<f4"},         // Little-endian 32-bit float
-      {"shape", {2, 3, 4}},
-      {"chunks", {1,1,1 }}     // Chunk size
+      {"dtype", "<i4"},         // Little-endian 32-bit integer
+      {"shape", {128, 128, 64}},
+      {"chunks", {128, 128, 64}}     // 64x64x64 chunks = 1MB per chunk
     }}
   }, tensorstore::OpenMode::create).result();
   
@@ -77,19 +92,20 @@ int main(int argc, char* argv[]) {
     return 1;
   }
   
-  std::cout << "✓ Successfully wrote 2x3x4 tensor to remote DRAM!" << std::endl;
+  std::cout << "✓ Successfully wrote " << dim0 << "x" << dim1 << "x" << dim2 << " tensor to remote DRAM!" << std::endl;
   std::cout << "✓ Data stored in Zarr format with metadata:" << std::endl;
-  std::cout << "  - Data type: <f4 (32-bit float)" << std::endl;
-  std::cout << "  - Shape: [2, 3, 4]" << std::endl;
-  std::cout << "  - Chunk size: [1, 3, 4]" << std::endl;
+  std::cout << "  - Data type: <i4 (32-bit integer)" << std::endl;
+  std::cout << "  - Shape: [" << dim0 << ", " << dim1 << ", " << dim2 << "]" << std::endl;
+  std::cout << "  - Chunk size: [64, 64, 64]" << std::endl;
   std::cout << "  - Compression: none" << std::endl;
+  std::cout << "  - Total size: " << size_mb << " MB" << std::endl;
   
   // // Write some additional test data to different array positions
   // std::cout << "\nWriting additional test slices..." << std::endl;
   
   // // Create a smaller array for partial writes
-  // auto slice_data = tensorstore::MakeArray<float>(
-  //     {{100.0f, 200.0f, 300.0f, 400.0f}});
+  // auto slice_data = tensorstore::MakeArray<int32_t>(
+  //     {{100, 200, 300, 400}});
   
   // // Write to specific slice [1, 0, :]
   // auto slice_spec = store | tensorstore::Dims(0, 1).SizedInterval({1, 0}, {1, 1});
@@ -113,9 +129,9 @@ int main(int argc, char* argv[]) {
       {"remote_addr", server_addr}
     }},
     {"metadata", {
-      {"dtype", "<f4"},
-      {"shape", {2, 3, 4}},
-      {"chunks", {1, 1, 1}}
+      {"dtype", "<i4"},
+      {"shape", {128, 128, 64}},
+      {"chunks", {128, 128, 64}}
     }}
   }, tensorstore::OpenMode::open).result();
   
@@ -168,26 +184,35 @@ int main(int argc, char* argv[]) {
     std::cout << "✓ Shapes match, comparing data..." << std::endl;
     
     // Get raw data pointers
-    const float* original_data = tensor.data();
+    const int32_t* original_data = tensor.data();
     const void* read_data = read_tensor.data();
     
     data_matches = true;
-    size_t num_elements = 2 * 3 * 4;  // 2x3x4 tensor
+    size_t num_elements = dim0 * dim1 * dim2;  // 128x128x64 tensor
     
-    std::cout << "\nElement-by-element comparison:" << std::endl;
+    std::cout << "\nVerifying " << num_elements << " elements..." << std::endl;
+    
+    // For large data, sample verification instead of printing all
+    size_t mismatches = 0;
+    
     for (size_t i = 0; i < num_elements; ++i) {
-      float original_val = original_data[i];
-      float read_val = static_cast<const float*>(read_data)[i];
+      int32_t original_val = original_data[i];
+      int32_t read_val = static_cast<const int32_t*>(read_data)[i];
       
-      std::cout << "  Element[" << i << "] original=" << original_val 
-                << ", read=" << read_val;
-      
-      if (std::abs(original_val - read_val) < 1e-6f) {
-        std::cout << " ✓" << std::endl;
-      } else {
-        std::cout << " ✗" << std::endl;
+      if (original_val != read_val) {
+        mismatches++;
+        if (mismatches <= 10) {  // Only print first 10 mismatches
+          std::cout << "  Mismatch at element[" << i << "] original=" << original_val 
+                    << ", read=" << read_val << std::endl;
+        }
         data_matches = false;
       }
+    }
+    
+    if (mismatches > 0) {
+      std::cout << "✗ Found " << mismatches << " mismatches out of " << num_elements << " elements" << std::endl;
+    } else {
+      std::cout << "✓ All " << num_elements << " elements verified successfully!" << std::endl;
     }
     
     if (data_matches) {

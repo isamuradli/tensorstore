@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "remote_dram_kvstore.h"
+#include "unified_buffer_manager.h"
 
 #include <optional>
 #include <string>
@@ -216,88 +217,72 @@ std::atomic<size_t> UcxCallbackDispatcher::next_queue_{0};
 UcxCallbackDispatcher::CleanupHelper UcxCallbackDispatcher::cleanup_helper_;
 
 
-// UCX-native memory buffer with proper registration for zero-copy operations
-class UcxNativeBuffer {
- public:
-  static std::unique_ptr<UcxNativeBuffer> Create(ucp_context_h context, size_t size) {
-    return std::make_unique<UcxNativeBuffer>(context, size);
-  }
-  
-  explicit UcxNativeBuffer(ucp_context_h context, size_t size) 
-    : context_(context), size_(size), data_(nullptr), mem_handle_(nullptr) {
-    
-    // Use UCX native memory allocation with registration
-    ucp_mem_map_params_t mem_params;
-    mem_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
-                           UCP_MEM_MAP_PARAM_FIELD_LENGTH |
-                           UCP_MEM_MAP_PARAM_FIELD_FLAGS;
-    mem_params.address = nullptr;  // Let UCX allocate
-    mem_params.length = size;
-    mem_params.flags = UCP_MEM_MAP_ALLOCATE;  // Allocate and register
-    
-    ucs_status_t status = ucp_mem_map(context_, &mem_params, &mem_handle_);
-    if (status == UCS_OK) {
-      // Get the allocated address
-      ucp_mem_attr_t mem_attr;
-      mem_attr.field_mask = UCP_MEM_ATTR_FIELD_ADDRESS;
-      
-      ucs_status_t attr_status = ucp_mem_query(mem_handle_, &mem_attr);
-      if (attr_status == UCS_OK) {
-        data_ = static_cast<char*>(mem_attr.address);
-      } else {
-        ABSL_LOG(ERROR) << "Failed to query UCX memory attributes: " 
-                        << ucs_status_string(attr_status);
-        ucp_mem_unmap(context_, mem_handle_);
-        mem_handle_ = nullptr;
-      }
+// UcxNativeBuffer implementation
+
+std::unique_ptr<UcxNativeBuffer> UcxNativeBuffer::Create(ucp_context_h context, size_t size) {
+  return std::make_unique<UcxNativeBuffer>(context, size);
+}
+
+UcxNativeBuffer::UcxNativeBuffer(ucp_context_h context, size_t size)
+  : context_(context), size_(size), data_(nullptr), mem_handle_(nullptr) {
+
+  // Use UCX native memory allocation with registration
+  ucp_mem_map_params_t mem_params;
+  mem_params.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
+                         UCP_MEM_MAP_PARAM_FIELD_LENGTH |
+                         UCP_MEM_MAP_PARAM_FIELD_FLAGS;
+  mem_params.address = nullptr;  // Let UCX allocate
+  mem_params.length = size;
+  mem_params.flags = UCP_MEM_MAP_ALLOCATE;  // Allocate and register
+
+  ucs_status_t status = ucp_mem_map(context_, &mem_params, &mem_handle_);
+  if (status == UCS_OK) {
+    // Get the allocated address
+    ucp_mem_attr_t mem_attr;
+    mem_attr.field_mask = UCP_MEM_ATTR_FIELD_ADDRESS;
+
+    ucs_status_t attr_status = ucp_mem_query(mem_handle_, &mem_attr);
+    if (attr_status == UCS_OK) {
+      data_ = static_cast<char*>(mem_attr.address);
     } else {
-      ABSL_LOG(ERROR) << "Failed to allocate UCX memory: " << ucs_status_string(status);
+      ABSL_LOG(ERROR) << "Failed to query UCX memory attributes: "
+                      << ucs_status_string(attr_status);
+      ucp_mem_unmap(context_, mem_handle_);
       mem_handle_ = nullptr;
     }
+  } else {
+    ABSL_LOG(ERROR) << "Failed to allocate UCX memory: " << ucs_status_string(status);
+    mem_handle_ = nullptr;
   }
-  
-  ~UcxNativeBuffer() {
+}
+
+UcxNativeBuffer::~UcxNativeBuffer() {
+  if (mem_handle_ != nullptr) {
+    ucp_mem_unmap(context_, mem_handle_);
+  }
+}
+
+UcxNativeBuffer::UcxNativeBuffer(UcxNativeBuffer&& other) noexcept
+  : context_(other.context_), size_(other.size_),
+    data_(other.data_), mem_handle_(other.mem_handle_) {
+  other.data_ = nullptr;
+  other.mem_handle_ = nullptr;
+}
+
+UcxNativeBuffer& UcxNativeBuffer::operator=(UcxNativeBuffer&& other) noexcept {
+  if (this != &other) {
     if (mem_handle_ != nullptr) {
       ucp_mem_unmap(context_, mem_handle_);
     }
-  }
-  
-  // Non-copyable, movable
-  UcxNativeBuffer(const UcxNativeBuffer&) = delete;
-  UcxNativeBuffer& operator=(const UcxNativeBuffer&) = delete;
-  UcxNativeBuffer(UcxNativeBuffer&& other) noexcept
-    : context_(other.context_), size_(other.size_), 
-      data_(other.data_), mem_handle_(other.mem_handle_) {
+    context_ = other.context_;
+    size_ = other.size_;
+    data_ = other.data_;
+    mem_handle_ = other.mem_handle_;
     other.data_ = nullptr;
     other.mem_handle_ = nullptr;
   }
-  UcxNativeBuffer& operator=(UcxNativeBuffer&& other) noexcept {
-    if (this != &other) {
-      if (mem_handle_ != nullptr) {
-        ucp_mem_unmap(context_, mem_handle_);
-      }
-      context_ = other.context_;
-      size_ = other.size_;
-      data_ = other.data_;
-      mem_handle_ = other.mem_handle_;
-      other.data_ = nullptr;
-      other.mem_handle_ = nullptr;
-    }
-    return *this;
-  }
-  
-  char* data() { return data_; }
-  const char* data() const { return data_; }
-  size_t size() const { return size_; }
-  ucp_mem_h mem_handle() const { return mem_handle_; }
-  bool is_valid() const { return data_ != nullptr && mem_handle_ != nullptr; }
-  
- private:
-  ucp_context_h context_;
-  size_t size_;
-  char* data_;
-  ucp_mem_h mem_handle_;
-};
+  return *this;
+}
 
 // Server-side task for handling read responses safely with reference counting
 struct ServerReadResponseTask : public internal::AtomicReferenceCount<ServerReadResponseTask> {
@@ -537,6 +522,39 @@ void SendCallback(void* request, ucs_status_t status, void* user_data) {
   }
 }
 
+/// Unified send callback for all UCX send operations
+void SendCallbackUnified(void* request, ucs_status_t status, void* user_data) {
+  // Handle unified user data with automatic UCX memory cleanup
+  struct SendUserDataUnified {
+    uint64_t request_id;
+    UnifiedBufferManager::ManagedBuffer buffer;  // RAII cleanup
+  };
+
+  SendUserDataUnified* data = static_cast<SendUserDataUnified*>(user_data);
+  uint64_t request_id = data->request_id;
+
+  if (status != UCS_OK) {
+    ABSL_LOG(ERROR) << "UCX send failed [ID:" << request_id << "]: "
+                    << ucs_status_string(status);
+  }
+
+  absl::Status result_status = (status == UCS_OK) ?
+    absl::OkStatus() :
+    absl::InternalError(absl::StrFormat("UCX send failed: %s",
+                                       ucs_status_string(status)));
+
+  // Complete operation using direct path
+  UcxManager::Instance().CompletePendingOperationDirect(request_id, result_status);
+
+  // Automatic cleanup: ManagedBuffer destructor handles UCX memory
+  delete data;
+
+  // Handle UCX request cleanup
+  if (request != nullptr) {
+    ucp_request_free(request);
+  }
+}
+
 /// Connection callback for server-side client connections
 void UcxListenerCallback(ucp_conn_request_h conn_request, void* user_data) {
   ABSL_LOG(INFO) << "UCX listener received connection request";
@@ -720,7 +738,7 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
     kvstore::ReadResult result;
     if (response->status_code == 0 && response->header.value_length > 0) {
       // Validate value_length is reasonable
-      if (response->header.value_length > 1000000) {  // 1MB max sanity check
+      if (response->header.value_length > 4194304) {  // Set to block size
         ABSL_LOG(ERROR) << "Received invalid value_length: " << response->header.value_length;
         result.state = kvstore::ReadResult::kMissing;
         result.stamp.generation = StorageGeneration::NoValue();
@@ -749,7 +767,7 @@ void ClientReceiveCallback(void* request, ucs_status_t status, const ucp_tag_rec
         buffer = nullptr;  // Ownership transferred, prevent double delete
         result.stamp.generation = StorageGeneration::FromString("remote_read");
         result.stamp.time = absl::Now();
-        ABSL_LOG(INFO) << "Read successful, value size=" << result.value.size();
+        // ABSL_LOG(INFO) << "Read successful, value size=" << result.value.size();
       }
     } else {
       // Key not found or error
@@ -856,106 +874,148 @@ void ClientWriteResponseCallback(void* request, ucs_status_t status, const ucp_t
 // PHASE 1 OPTIMIZATION 1 + 3: Zero-Copy Buffer Management with UCX Integration
 class ZeroCopyMessageBuilder {
 public:
-  static std::unique_ptr<char[]> BuildWriteMessage(
-      const kvstore::Key& key, 
+  struct MessageResult {
+    UnifiedBufferManager::ManagedBuffer buffer;
+    size_t total_size;
+    ucp_mem_h mem_handle;  // For UCX send parameters
+  };
+
+  static std::optional<MessageResult> BuildWriteMessage(
+      ucp_context_h context,
+      const kvstore::Key& key,
       const absl::Cord& value,
-      uint64_t request_id,
-      size_t* total_size) {
-    
-    *total_size = sizeof(MessageHeader) + key.size() + value.size();
-    auto buffer = std::make_unique<char[]>(*total_size);
-    
-    // Initialize header directly in buffer
-    MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer.get());
-    char* payload = buffer.get() + sizeof(MessageHeader);
-    
+      uint64_t request_id) {
+
+    size_t total_size = sizeof(MessageHeader) + key.size() + value.size();
+
+    auto buffer_opt = UnifiedBufferManager::AllocateForSend(context, total_size);
+    if (!buffer_opt) {
+      ABSL_LOG(ERROR) << "Failed to allocate buffer for write message";
+      return std::nullopt;
+    }
+
+    auto& buffer = *buffer_opt;
+
+    // Initialize header directly in registered buffer
+    MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer.data());
+    char* payload = buffer.data() + sizeof(MessageHeader);
+
     // Direct key copy (no intermediate storage)
     std::memcpy(payload, key.data(), key.size());
-    
+
     // Direct cord-to-buffer copy (avoid string conversion)
     size_t offset = key.size();
     for (absl::string_view chunk : value.Chunks()) {
       std::memcpy(payload + offset, chunk.data(), chunk.size());
       offset += chunk.size();
     }
-    
+
+    // Initialize header
+    message_utils::InitializeMessageHeader(
+        header, MessageType::WRITE_REQUEST,
+        static_cast<uint32_t>(key.size()),
+        static_cast<uint32_t>(value.size()),
+        request_id, payload);
+
+    return MessageResult{
+        .buffer = std::move(buffer),
+        .total_size = total_size,
+        .mem_handle = buffer_opt->mem_handle()
+    };
+  }
+
+  static std::optional<MessageResult> BuildReadMessage(
+      ucp_context_h context,
+      const kvstore::Key& key,
+      uint64_t request_id) {
+
+    size_t total_size = sizeof(MessageHeader) + key.size();
+
+    auto buffer_opt = UnifiedBufferManager::AllocateForSend(context, total_size);
+    if (!buffer_opt) {
+      ABSL_LOG(ERROR) << "Failed to allocate buffer for read message";
+      return std::nullopt;
+    }
+
+    auto& buffer = *buffer_opt;
+
+    // Initialize header directly in registered buffer
+    MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer.data());
+    char* payload = buffer.data() + sizeof(MessageHeader);
+
+    // Direct key copy (no intermediate storage)
+    std::memcpy(payload, key.data(), key.size());
+
+    // Initialize header
+    message_utils::InitializeMessageHeader(
+        header, MessageType::READ_REQUEST,
+        static_cast<uint32_t>(key.size()),
+        0, // No value for read request
+        request_id, payload);
+
+    return MessageResult{
+        .buffer = std::move(buffer),
+        .total_size = total_size,
+        .mem_handle = buffer_opt->mem_handle()
+    };
+  }
+
+  // Legacy methods for backward compatibility during transition
+  static std::unique_ptr<char[]> BuildWriteMessage(
+      const kvstore::Key& key,
+      const absl::Cord& value,
+      uint64_t request_id,
+      size_t* total_size) {
+
+    *total_size = sizeof(MessageHeader) + key.size() + value.size();
+    auto buffer = std::make_unique<char[]>(*total_size);
+
+    // Initialize header directly in buffer
+    MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer.get());
+    char* payload = buffer.get() + sizeof(MessageHeader);
+
+    // Direct key copy (no intermediate storage)
+    std::memcpy(payload, key.data(), key.size());
+
+    // Direct cord-to-buffer copy (avoid string conversion)
+    size_t offset = key.size();
+    for (absl::string_view chunk : value.Chunks()) {
+      std::memcpy(payload + offset, chunk.data(), chunk.size());
+      offset += chunk.size();
+    }
+
     // Initialize header with pre-calculated checksum
     message_utils::InitializeMessageHeader(
         header, MessageType::WRITE_REQUEST,
         static_cast<uint32_t>(key.size()),
         static_cast<uint32_t>(value.size()),
         request_id, payload);
-    
-    return buffer;
-  }
 
-  // PHASE 1 OPTIMIZATION 3: UCX-aware message construction with registered memory
-  static char* BuildWriteMessageUcx(
-      const kvstore::Key& key,
-      const absl::Cord& value,
-      uint64_t request_id,
-      size_t* total_size,
-      ucp_mem_h* mem_handle) {
-    
-    *total_size = sizeof(MessageHeader) + key.size() + value.size();
-    
-    // Use regular allocation for message building (simpler memory management)
-    char* buffer = new char[*total_size];
-    *mem_handle = nullptr;  // Not using UCX registration for message building
-    
-    if (buffer) {
-      // Initialize header directly in registered buffer
-      MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer);
-      char* payload = buffer + sizeof(MessageHeader);
-      
-      // Direct key copy (no intermediate storage)
-      std::memcpy(payload, key.data(), key.size());
-      
-      // Direct cord-to-buffer copy (avoid string conversion)
-      size_t offset = key.size();
-      for (absl::string_view chunk : value.Chunks()) {
-        std::memcpy(payload + offset, chunk.data(), chunk.size());
-        offset += chunk.size();
-      }
-      
-      // Initialize header with pre-calculated checksum
-      message_utils::InitializeMessageHeader(
-          header, MessageType::WRITE_REQUEST,
-          static_cast<uint32_t>(key.size()),
-          static_cast<uint32_t>(value.size()),
-          request_id, payload);
-      
-      return buffer;
-    }
-    
-    // Fallback to regular allocation if UCX buffer not available
-    auto fallback_buffer = BuildWriteMessage(key, value, request_id, total_size);
-    *mem_handle = nullptr;
-    return fallback_buffer.release();
+    return buffer;
   }
 
   static std::unique_ptr<char[]> BuildReadMessage(
       const kvstore::Key& key,
       uint64_t request_id,
       size_t* total_size) {
-    
+
     *total_size = sizeof(MessageHeader) + key.size();
     auto buffer = std::make_unique<char[]>(*total_size);
-    
+
     // Initialize header directly in buffer
     MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer.get());
     char* payload = buffer.get() + sizeof(MessageHeader);
-    
+
     // Direct key copy (no intermediate storage)
     std::memcpy(payload, key.data(), key.size());
-    
+
     // Initialize header with pre-calculated checksum
     message_utils::InitializeMessageHeader(
         header, MessageType::READ_REQUEST,
         static_cast<uint32_t>(key.size()),
         0, // No value for read request
         request_id, payload);
-    
+
     return buffer;
   }
 };
@@ -1067,7 +1127,6 @@ absl::Status UcxManager::Initialize() {
   // UCX native memory management - no buffer pool initialization needed
   
   // Start worker progress polling outside of mutex scope
-  ABSL_LOG(INFO) << "Starting UCX worker progress task";
   StartWorkerProgressTask();
   
   return absl::OkStatus();
@@ -1238,15 +1297,11 @@ Result<ucp_ep_h> UcxManager::CreateClientEndpoint(const std::string& server_addr
   
   ABSL_LOG(INFO) << "Attempting to create UCX client endpoint with socket connection";
   ABSL_LOG(INFO) << "  Server address: " << server_addr;
-  ABSL_LOG(INFO) << "  Socket family: " << server_sockaddr.sin_family;
   ABSL_LOG(INFO) << "  Socket port: " << ntohs(server_sockaddr.sin_port);
-  ABSL_LOG(INFO) << "  Worker: " << worker_;
   
   // Create the client endpoint
   ucp_ep_h client_endpoint;
   ucs_status_t status = ucp_ep_create(worker_, &ep_params, &client_endpoint);
-  
-  ABSL_LOG(INFO) << "UCX endpoint creation result: " << ucs_status_string(status) << " (" << status << ")";
   
   if (status != UCS_OK) {
     ABSL_LOG(ERROR) << "Failed to create UCX client endpoint: " << ucs_status_string(status);
@@ -1615,7 +1670,6 @@ void UcxManager::StartWorkerProgressTask() {
     return;
   }
   
-  ABSL_LOG(INFO) << "Starting worker progress task";
   progress_task_running_.store(true);
   
   // ENHANCED: Use a joinable thread with proper lifetime management
@@ -1630,46 +1684,75 @@ void UcxManager::StartWorkerProgressTask() {
 }
 
 void UcxManager::WorkerProgressTask() {
-  ABSL_LOG(INFO) << "UCX native worker progress started";
-  
   while (true) {
     ucp_worker_h worker_handle = nullptr;
-    
-    // Get worker handle without holding mutex for too long
+    bool should_continue = false;
+
+    // Get worker handle safely
     {
       absl::MutexLock lock(&mutex_);
       if (!initialized_ || !progress_task_running_) {
         break;
       }
-      
       worker_handle = worker_;
+      should_continue = true;
     }
-    
-    if (!worker_handle) {
+
+    if (!worker_handle || !should_continue) {
       break;
     }
-    
-    // Use UCX native wait mechanism instead of busy polling
-    // First drain any existing events
+
+    // Process all immediately available work
     unsigned progress_count = 0;
     do {
       progress_count = ucp_worker_progress(worker_handle);
+      progress_metrics_.RecordProgressCall(progress_count);
     } while (progress_count > 0);
-    
-    // Check shutdown before potentially blocking wait
+
+    // Check shutdown condition before potentially blocking
     {
       absl::MutexLock lock(&mutex_);
       if (!progress_task_running_) {
         break;
       }
     }
-    
-    // Use a brief sleep instead of indefinite blocking to allow shutdown checks
-    // This trades some efficiency for proper shutdown behavior
-    std::this_thread::sleep_for(std::chrono::microseconds(100));
+
+    progress_metrics_.RecordWaitCycle();
+
+    // Use UCX native wait if enabled, otherwise fallback to sleep
+    if (use_native_wait_.load()) {
+      // Use UCX native wait mechanism for efficiency
+      ucs_status_t arm_status = ucp_worker_arm(worker_handle);
+      if (arm_status == UCS_OK) {
+        // Worker is armed for notifications, wait for events
+        ucs_status_t wait_status = ucp_worker_wait(worker_handle);
+
+        if (wait_status != UCS_OK && wait_status != UCS_ERR_TIMED_OUT) {
+          ABSL_LOG(WARNING) << "UCX worker wait failed: " << ucs_status_string(wait_status);
+          // Brief fallback sleep on wait failure
+          progress_metrics_.RecordFallbackSleep();
+          std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+      } else if (arm_status == UCS_ERR_BUSY) {
+        // Worker has pending events, continue immediately without waiting
+        continue;
+      } else {
+        ABSL_LOG(WARNING) << "UCX worker arm failed: " << ucs_status_string(arm_status);
+        // Fallback to brief sleep on arm failure
+        progress_metrics_.RecordFallbackSleep();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+    } else {
+      // Fallback mode: use the original sleep-based approach
+      progress_metrics_.RecordFallbackSleep();
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
   }
-  
-  ABSL_LOG(INFO) << "UCX native worker progress stopped";
+
+  ABSL_LOG(INFO) << "UCX worker progress stopped";
+
+  // Log final performance metrics
+  progress_metrics_.LogPerformance();
 }
 
 void UcxManager::Shutdown() {
@@ -1874,14 +1957,20 @@ class RemoteDramDriver
     
     ABSL_LOG(INFO) << "WriteRemote sending data for key '" << key << "' with " << value.size() << " bytes to server";
     
-    // PHASE 1 OPTIMIZATION 3: UCX-aware zero-copy message construction with registered memory
-    size_t message_size;
-    ucp_mem_h mem_handle;
-    char* message_buffer = ZeroCopyMessageBuilder::BuildWriteMessageUcx(
-        key, value, request_id, &message_size, &mem_handle);
-    
+    // Use unified buffer management for message construction
+    auto message_result_opt = ZeroCopyMessageBuilder::BuildWriteMessage(
+        ucx_manager.GetContext(), key, value, request_id);
+
+    if (!message_result_opt) {
+      return absl::InternalError("Failed to allocate message buffer");
+    }
+
+    auto& message_result = *message_result_opt;
+
     // Log message for debugging
-    message_utils::LogMessageBuffer(message_buffer, message_size, "Client sending write request");
+    message_utils::LogMessageBuffer(message_result.buffer.data(),
+                                  message_result.total_size,
+                                  "Client sending unified write request");
     
     ABSL_LOG(INFO) << "Sending UCX write request: key='" << key << "', value_size=" << value.size() << ", request_id=" << request_id;
     std::cout << "📤 CLIENT: Sending write request [ID:" << request_id << "]" << std::endl;
@@ -1892,67 +1981,46 @@ class RemoteDramDriver
     // Register pending operation
     ucx_manager.RegisterPendingOperation(request_id, std::move(promise), MessageType::WRITE_REQUEST);
     
-    // Post a receive buffer to get the write response
+    // Post write response receive with unified buffer
     PostWriteResponseReceive(request_id);
-    
-    // Send message using UCX tagged messaging
-    ucp_request_param_t send_params;
-    memset(&send_params, 0, sizeof(send_params));  // Initialize all fields to zero
-    send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-    send_params.cb.send = SendCallback;
-    
-    // PHASE 1 OPTIMIZATION 3: Add memory handle for registered memory
-    if (mem_handle != nullptr) {
-      send_params.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH;
-      send_params.memh = mem_handle;
-    }
-    
-    ucp_tag_t tag = UCX_TAG_WRITE_REQUEST;  // Use distinct tag for write operations
-    
-    // PHASE 1 OPTIMIZATION 3: Direct UCX send with optimized buffer
-    char* stable_buffer = message_buffer;  // Already stable from UCX buffer pool or fallback
-    
-    // Double-check the buffer contents before sending
-    message_utils::LogMessageBuffer(stable_buffer, message_size, "UCX-optimized buffer before send");
-    
-    // Store the buffer pointer in user_data so we can free it in the callback
-    struct SendUserData {
+
+    // Create user data for callback - now holds ManagedBuffer
+    struct SendUserDataUnified {
       uint64_t request_id;
-      char* buffer_to_free;
-      bool from_ucx_pool;  // Track if buffer came from UCX pool or regular allocation
+      UnifiedBufferManager::ManagedBuffer buffer;  // RAII cleanup
     };
-    SendUserData* user_data = new SendUserData{request_id, stable_buffer, (mem_handle != nullptr)};
+
+    auto* user_data = new SendUserDataUnified{
+        .request_id = request_id,
+        .buffer = std::move(message_result.buffer)
+    };
+
+    // Send message using UCX tagged messaging with registered memory
+    ucp_request_param_t send_params;
+    memset(&send_params, 0, sizeof(send_params));
+    send_params.op_attr_mask = UCP_OP_ATTR_FIELD_CALLBACK |
+                              UCP_OP_ATTR_FIELD_USER_DATA |
+                              UCP_OP_ATTR_FIELD_MEMH;  // Use registered memory
+    send_params.cb.send = SendCallbackUnified;
+    send_params.memh = user_data->buffer.mem_handle();  // Get handle from moved buffer
     send_params.user_data = user_data;
+
+    void* request = ucp_tag_send_nbx(client_endpoint_, user_data->buffer.data(),
+                                     message_result.total_size,
+                                     UCX_TAG_WRITE_REQUEST, &send_params);
     
-    void* request = ucp_tag_send_nbx(client_endpoint_, stable_buffer, 
-                                     message_size, tag, &send_params);
-    
+    // Handle request status with unified cleanup
     if (UCS_PTR_IS_ERR(request)) {
       ucs_status_t error_status = UCS_PTR_STATUS(request);
-      ABSL_LOG(ERROR) << "UCX send failed immediately: " << ucs_status_string(error_status);
-      ucx_manager.CompletePendingOperationDirect(request_id, 
-          absl::InternalError(absl::StrFormat("UCX send failed: %s", 
-              ucs_status_string(error_status))));
-      // UCX native memory management - proper cleanup based on source
-      if (mem_handle != nullptr) {
-        // UCX native buffer - cleanup handled automatically
-        // No manual cleanup needed
-      } else {
-        delete[] stable_buffer;
-      }
-      delete user_data;
+      ABSL_LOG(ERROR) << "UCX send failed: " << ucs_status_string(error_status);
+      ucx_manager.CompletePendingOperationDirect(request_id,
+          absl::InternalError("UCX send failed"));
+      delete user_data;  // ManagedBuffer automatically cleans up UCX memory
     } else if (request == nullptr) {
-      // Send completed immediately, but still wait for server response
-      ABSL_LOG(INFO) << "UCX write request sent immediately for request_id=" << request_id;
-      // DON'T complete here - wait for server response in ClientWriteResponseCallback
-      // Clean up send resources only
-      delete[] stable_buffer;
-      delete user_data;
-    } else {
-      // Send is in progress, will complete asynchronously via SendCallback
-      ABSL_LOG(INFO) << "UCX write request in progress for request_id=" << request_id;
-      // Resources will be cleaned up in SendCallback
+      // Immediate completion
+      delete user_data;  // ManagedBuffer automatically cleans up UCX memory
     }
+    // For non-NULL requests: SendCallbackUnified will handle cleanup
     
     // Transform the void future to TimestampedStorageGeneration future
     auto [result_promise, result_future] = PromiseFuturePair<TimestampedStorageGeneration>::Make();

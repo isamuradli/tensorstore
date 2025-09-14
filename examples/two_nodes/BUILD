@@ -235,3 +235,21 @@ tensorstore_cc_binary(
         "@abseil-cpp//absl/time",
     ],
 )
+
+tensorstore_cc_binary(
+    name = "zarr_async_test",
+    srcs = ["zarr_async_test.cc"],
+    deps = [
+        "//tensorstore",
+        "//tensorstore:all_drivers",
+        "//tensorstore:array",
+        "//tensorstore:data_type",
+        "//tensorstore:open",
+        "//tensorstore:spec",
+        "//tensorstore/kvstore",
+        "//tensorstore/kvstore/remote_dram",
+        "//tensorstore/util:result",
+        "//tensorstore/util:status",
+        "//tensorstore/util:future",
+    ],
+)

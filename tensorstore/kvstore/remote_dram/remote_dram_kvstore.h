@@ -200,6 +200,86 @@ class RemoteDramStorage {
   
 };
 
+/// UCX-native memory buffer with proper registration for zero-copy operations
+class UcxNativeBuffer {
+ public:
+  static std::unique_ptr<UcxNativeBuffer> Create(ucp_context_h context, size_t size);
+
+  explicit UcxNativeBuffer(ucp_context_h context, size_t size);
+  ~UcxNativeBuffer();
+
+  // Non-copyable, movable
+  UcxNativeBuffer(const UcxNativeBuffer&) = delete;
+  UcxNativeBuffer& operator=(const UcxNativeBuffer&) = delete;
+  UcxNativeBuffer(UcxNativeBuffer&&) noexcept;
+  UcxNativeBuffer& operator=(UcxNativeBuffer&&) noexcept;
+
+  char* data() { return data_; }
+  const char* data() const { return data_; }
+  size_t size() const { return size_; }
+  bool is_valid() const { return mem_handle_ != nullptr && data_ != nullptr; }
+  ucp_mem_h mem_handle() const { return mem_handle_; }
+
+ private:
+  ucp_context_h context_;
+  size_t size_;
+  char* data_;
+  ucp_mem_h mem_handle_;
+};
+
+/// Performance metrics for UCX worker progress thread
+class WorkerProgressMetrics {
+public:
+  struct Stats {
+    std::atomic<uint64_t> progress_calls{0};
+    std::atomic<uint64_t> events_processed{0};
+    std::atomic<uint64_t> wait_cycles{0};
+    std::atomic<uint64_t> fallback_sleeps{0};
+    std::chrono::steady_clock::time_point start_time{std::chrono::steady_clock::now()};
+  } stats;
+
+  void RecordProgressCall(unsigned events) {
+    stats.progress_calls++;
+    stats.events_processed += events;
+  }
+
+  void RecordWaitCycle() {
+    stats.wait_cycles++;
+  }
+
+  void RecordFallbackSleep() {
+    stats.fallback_sleeps++;
+  }
+
+  void LogPerformance() const {
+    auto elapsed = std::chrono::steady_clock::now() - stats.start_time;
+    auto seconds = std::chrono::duration<double>(elapsed).count();
+
+    ABSL_LOG(INFO) << "Worker Progress Performance:";
+    ABSL_LOG(INFO) << "  Progress calls: " << stats.progress_calls;
+    ABSL_LOG(INFO) << "  Events processed: " << stats.events_processed;
+    ABSL_LOG(INFO) << "  Wait cycles: " << stats.wait_cycles;
+    ABSL_LOG(INFO) << "  Fallback sleeps: " << stats.fallback_sleeps << " ("
+                   << (stats.wait_cycles > 0 ? (100.0 * stats.fallback_sleeps / stats.wait_cycles) : 0.0) << "%)";
+    ABSL_LOG(INFO) << "  Events/second: " << (seconds > 0 ? (stats.events_processed / seconds) : 0.0);
+  }
+
+  // Get efficiency percentage (higher is better)
+  double GetEfficiencyPercentage() const {
+    if (stats.wait_cycles == 0) return 100.0;
+    return 100.0 * (1.0 - static_cast<double>(stats.fallback_sleeps) / stats.wait_cycles);
+  }
+
+  // Reset all metrics
+  void Reset() {
+    stats.progress_calls = 0;
+    stats.events_processed = 0;
+    stats.wait_cycles = 0;
+    stats.fallback_sleeps = 0;
+    stats.start_time = std::chrono::steady_clock::now();
+  }
+};
+
 /// Singleton UCX Manager to handle global UCX state and worker polling
 class UcxManager {
  public:
@@ -295,7 +375,21 @@ class UcxManager {
   
   /// Remove completed request from active list without acquiring mutex (for use within locked context)
   void RemoveActiveRequestNoLock(void* request);
-  
+
+  /// Get performance metrics for the worker progress thread
+  const WorkerProgressMetrics& GetProgressMetrics() const {
+    return progress_metrics_;
+  }
+
+  /// Enable/disable UCX native wait (for testing and fallback)
+  void SetUseNativeWait(bool enable) {
+    use_native_wait_ = enable;
+  }
+
+  bool IsUsingNativeWait() const {
+    return use_native_wait_;
+  }
+
   // CONCURRENCY CONTROL: Public for callback access
   // Atomic counter for active receive buffers
   std::atomic<int> active_receive_buffers_{0};
@@ -350,7 +444,11 @@ class UcxManager {
   
   // PHASE 1 OPTIMIZATION 2: Lock-free atomic request ID generation
   std::atomic<uint64_t> next_request_id_{1};
-  
+
+  // PHASE 1 IMPROVEMENT: Performance metrics and configuration
+  WorkerProgressMetrics progress_metrics_;
+  std::atomic<bool> use_native_wait_{true};  // Enable UCX native wait by default
+
   // CONCURRENCY CONTROL: Limit concurrent receive buffers to prevent crashes
   static constexpr int kMaxConcurrentReceiveBuffers = 5;  // Stable limit from testing
 };
